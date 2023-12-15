@@ -692,3 +692,17 @@ func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]do
 	}
 }
 
+func (d doneStruct) GetError() error {
+	n := len(d.errors)
+	if n == 0 {
+		return nil
+	}
+
+	var err error
+
+	for _, e := range d.errors {
+		err = errors.Join(err, e)
+	}
+
+	return err
+}
