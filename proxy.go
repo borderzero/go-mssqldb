@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/microsoft/go-mssqldb/msdsn"
 )
 
 const (
@@ -572,11 +574,8 @@ func writeLoginAck(l loginAckStruct) []byte {
 	return data
 }
 
-func NewClient(ctx context.Context, dsn string) (*Client, error) {
-	c, err := NewConnector(dsn)
-	if err != nil {
-		return nil, err
-	}
+func NewClient(ctx context.Context, params msdsn.Config) (*Client, error) {
+	c := newConnector(params, driverInstanceNoProcess)
 
 	conn, err := c.Connect(ctx)
 	if err != nil {
