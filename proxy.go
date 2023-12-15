@@ -40,6 +40,10 @@ type ServerConfig struct {
 	ProgName    *string
 }
 
+type ServerSession struct {
+	*tdsSession
+}
+
 func NewServer(config ServerConfig) (*Server, error) {
 	server := &Server{}
 
@@ -98,7 +102,7 @@ func NewServer(config ServerConfig) (*Server, error) {
 	return server, nil
 }
 
-func (s *Server) NewTdsServerSession(conn net.Conn) (*tdsSession, *login, error) {
+func (s *Server) NewTdsServerSession(conn net.Conn) (*ServerSession, *login, error) {
 	toconn := newTimeoutConn(conn, s.ConnTimeout)
 	inbuf := newTdsBuffer(s.PacketSize, toconn)
 
@@ -107,10 +111,10 @@ func (s *Server) NewTdsServerSession(conn net.Conn) (*tdsSession, *login, error)
 		return nil, nil, err
 	}
 
-	sess := tdsSession{
+	sess := ServerSession{&tdsSession{
 		buf:    inbuf,
 		logger: s.Logger,
-	}
+	}}
 
 	return &sess, &login, nil
 }
@@ -596,7 +600,7 @@ func (c *Client) Close() error {
 	return c.Conn.Close()
 }
 
-func (c *Client) SendSqlBatch(ctx context.Context, serverConn *tdsSession, query string, headers []headerStruct, resetSession bool) ([]doneStruct, error) {
+func (c *Client) SendSqlBatch(ctx context.Context, serverConn *ServerSession, query string, headers []headerStruct, resetSession bool) ([]doneStruct, error) {
 	if err := sendSqlBatch72(c.Conn.sess.buf, query, headers, resetSession); err != nil {
 		return nil, err
 	}
@@ -604,7 +608,7 @@ func (c *Client) SendSqlBatch(ctx context.Context, serverConn *tdsSession, query
 	return c.processResponse(ctx, serverConn)
 }
 
-func (c *Client) SendRpc(ctx context.Context, serverConn *tdsSession, headers []headerStruct, proc procId, flags uint16, params []param, resetSession bool) ([]doneStruct, error) {
+func (c *Client) SendRpc(ctx context.Context, serverConn *ServerSession, headers []headerStruct, proc procId, flags uint16, params []param, resetSession bool) ([]doneStruct, error) {
 	if err := sendRpc(c.Conn.sess.buf, headers, proc, flags, params, resetSession); err != nil {
 		return nil, err
 	}
@@ -612,8 +616,8 @@ func (c *Client) SendRpc(ctx context.Context, serverConn *tdsSession, headers []
 	return c.processResponse(ctx, serverConn)
 }
 
-func (c *Client) processResponse(ctx context.Context, sess *tdsSession) ([]doneStruct, error) {
-	c.Conn.sess.buf.serverConn = sess
+func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]doneStruct, error) {
+	c.Conn.sess.buf.serverConn = sess.tdsSession
 
 	packet_type, err := c.Conn.sess.buf.BeginRead()
 	if err != nil {
@@ -653,7 +657,7 @@ func (c *Client) processResponse(ctx context.Context, sess *tdsSession) ([]doneS
 				return dones, nil
 			}
 		case tokenColMetadata:
-			columns = parseColMetadata72(c.Conn.sess.buf, sess)
+			columns = parseColMetadata72(c.Conn.sess.buf, c.Conn.sess)
 		case tokenRow:
 			row := make([]interface{}, len(columns))
 			err = parseRow(ctx, c.Conn.sess.buf, c.Conn.sess, columns, row)
