@@ -176,6 +176,7 @@ type tdsSession struct {
 	connid          UniqueIdentifier
 	activityid      UniqueIdentifier
 	encoding        msdsn.EncodeParameters
+	loginEnvBytes   []byte
 }
 
 type alwaysEncryptedSettings struct {

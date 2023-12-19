@@ -102,7 +102,7 @@ func NewServer(config ServerConfig) (*Server, error) {
 	return server, nil
 }
 
-func (s *Server) NewTdsServerSession(conn net.Conn) (*ServerSession, *login, error) {
+func (s *Server) ReadLogin(conn net.Conn) (*ServerSession, *login, error) {
 	toconn := newTimeoutConn(conn, s.ConnTimeout)
 	inbuf := newTdsBuffer(s.PacketSize, toconn)
 
@@ -146,11 +146,6 @@ func (s *Server) handshake(r *tdsBuffer) (login, error) {
 	}
 
 	login, err = s.readLogin(r)
-	if err != nil {
-		return login, err
-	}
-
-	err = s.writeLogin(r)
 	if err != nil {
 		return login, err
 	}
@@ -211,7 +206,7 @@ func (s *Server) writePrelogin(r *tdsBuffer) error {
 func (s *Server) preparePreloginResponseFields() map[uint8][]byte {
 	fields := map[uint8][]byte{
 		// 4 bytes for version and 2 bytes for minor version
-		preloginVERSION:    {byte(s.Version), byte(s.Version >> 8), byte(s.Version >> 16), byte(s.Version >> 24), 0, 0},
+		preloginVERSION:    {byte(s.Version >> 24), byte(s.Version >> 16), byte(s.Version >> 8), byte(s.Version), 0, 0},
 		preloginENCRYPTION: {s.Encryption},
 		preloginINSTOPT:    {0},
 		preloginTHREADID:   {0, 0, 0, 0},
@@ -318,7 +313,7 @@ func readLoginFieldBytes(b []byte, offset uint16, length uint16) ([]byte, error)
 	return b[offset : offset+length*2], nil
 }
 
-func (s *Server) writeLogin(r *tdsBuffer) error {
+func (s *Server) WriteLogin(session *ServerSession, loginEnvBytes []byte) error {
 	loginAckStruct := loginAckStruct{
 		Interface:  1,
 		TDSVersion: verTDS74,
@@ -333,11 +328,12 @@ func (s *Server) writeLogin(r *tdsBuffer) error {
 		errors:   []Error{},
 	}
 
-	r.BeginPacket(packReply, false)
-	r.Write(writeLoginAck(loginAckStruct))
-	r.Write(writeDone(doneStruct))
+	session.buf.BeginPacket(packReply, false)
+	session.buf.Write(loginEnvBytes)
+	session.buf.Write(writeLoginAck(loginAckStruct))
+	session.buf.Write(writeDone(doneStruct))
 
-	return r.FinishPacket()
+	return session.buf.FinishPacket()
 }
 
 func UCS2String(s []byte) (string, error) {
@@ -682,6 +678,7 @@ func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]do
 		case tokenInfo:
 			info := parseInfo(c.Conn.sess.buf)
 			fmt.Printf("got INFO %d %s\n", info.Number, info.Message)
+
 		case tokenReturnValue:
 			parseReturnValue(c.Conn.sess.buf, c.Conn.sess)
 		default:
@@ -705,4 +702,12 @@ func (d doneStruct) GetError() error {
 	}
 
 	return err
+}
+
+func (c *Client) LoginEnvBytes() []byte {
+	return c.Conn.sess.loginEnvBytes
+}
+
+func (c *Client) Database() string {
+	return c.Conn.sess.database
 }
