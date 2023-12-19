@@ -172,6 +172,7 @@ type tdsSession struct {
 	routedPort      uint16
 	alwaysEncrypted bool
 	aeSettings      *alwaysEncryptedSettings
+	loginEnvBytes   []byte
 }
 
 type alwaysEncryptedSettings struct {
