@@ -144,15 +144,24 @@ type doneInProcStruct doneStruct
 
 // ENVCHANGE stream
 // http://msdn.microsoft.com/en-us/library/dd303449.aspx
-func processEnvChg(ctx context.Context, sess *tdsSession) {
+func processEnvChg(ctx context.Context, sess *tdsSession) []byte {
 	size := sess.buf.uint16()
-	r := &io.LimitedReader{R: sess.buf, N: int64(size)}
+	rb := &io.LimitedReader{R: sess.buf, N: int64(size)}
+
+	buf := new(bytes.Buffer)
+	_, err := io.Copy(buf, rb)
+	if err != nil {
+		badStreamPanic(err)
+	}
+
+	r := bytes.NewReader(buf.Bytes())
+
 	for {
 		var err error
 		var envtype uint8
 		err = binary.Read(r, binary.LittleEndian, &envtype)
 		if err == io.EOF {
-			return
+			return buf.Bytes()
 		}
 		if err != nil {
 			badStreamPanic(err)
@@ -393,7 +402,7 @@ func processEnvChg(ctx context.Context, sess *tdsSession) {
 		default:
 			// ignore rest of records because we don't know how to skip those
 			sess.LogF(ctx, msdsn.LogDebug, "WARN: Unknown ENVCHANGE record detected with type id = %d", envtype)
-			return
+			return buf.Bytes()
 		}
 	}
 }
@@ -1085,7 +1094,9 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 			}
 			ch <- row
 		case tokenEnvChange:
-			processEnvChg(ctx, sess)
+			tokenBytes := processEnvChg(ctx, sess)
+			sess.loginEnvBytes = append(sess.loginEnvBytes, []byte{byte(tokenEnvChange), byte(len(tokenBytes) & 0xFF), byte(len(tokenBytes) >> 8)}...)
+			sess.loginEnvBytes = append(sess.loginEnvBytes, tokenBytes...)
 		case tokenError:
 			err := parseError72(sess.buf)
 			sess.LogF(ctx, msdsn.LogDebug, "got ERROR %d %s", err.Number, err.Message)
@@ -1095,12 +1106,23 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 				_ = sqlexp.ReturnMessageEnqueue(ctx, outs.msgq, sqlexp.MsgError{Error: err})
 			}
 		case tokenInfo:
+<<<<<<< HEAD
 			info := parseInfo(sess.buf)
 			sess.LogF(ctx, msdsn.LogDebug, "got INFO %d %s", info.Number, info.Message)
 			sess.LogS(ctx, msdsn.LogMessages, info.Message)
 			if outs.msgq != nil {
 				_ = sqlexp.ReturnMessageEnqueue(ctx, outs.msgq, sqlexp.MsgNotice{Message: info})
+=======
+			length := sess.buf.uint16()
+			infoBytes := make([]byte, length)
+			_, err := sess.buf.Read(infoBytes)
+			if err != nil {
+				badStreamPanic(err)
+>>>>>>> 1158ce2 (proxy changes)
 			}
+
+			sess.loginEnvBytes = append(sess.loginEnvBytes, []byte{byte(tokenInfo), byte(length & 0xFF), byte(length >> 8)}...)
+			sess.loginEnvBytes = append(sess.loginEnvBytes, infoBytes...)
 		case tokenReturnValue:
 			nv := parseReturnValue(sess.buf, sess)
 			if len(nv.Name) > 0 {
