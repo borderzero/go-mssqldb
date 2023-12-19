@@ -676,9 +676,7 @@ func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]do
 			err := parseError72(c.Conn.sess.buf)
 			errs = append(errs, err)
 		case tokenInfo:
-			info := parseInfo(c.Conn.sess.buf)
-			fmt.Printf("got INFO %d %s\n", info.Number, info.Message)
-
+			parseInfo(c.Conn.sess.buf)
 		case tokenReturnValue:
 			parseReturnValue(c.Conn.sess.buf, c.Conn.sess)
 		default:
