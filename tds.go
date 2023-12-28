@@ -1045,6 +1045,7 @@ func prepareLogin(ctx context.Context, c *Connector, p msdsn.Config, logger Cont
 	} else {
 		serverName = p.Host
 	}
+
 	l = &login{
 		TDSVersion:     TDSVersion,
 		PacketSize:     packetSize,
@@ -1270,7 +1271,6 @@ initiate_connection:
 	if err != nil {
 		return nil, err
 	}
-
 	err = sendLogin(outbuf, login)
 	if err != nil {
 		return nil, err
