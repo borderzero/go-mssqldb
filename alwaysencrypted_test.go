@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"math/big"
 	"strings"
@@ -65,8 +66,10 @@ func TestAlwaysEncryptedE2E(t *testing.T) {
 		{"datetimeoffset(7)", "DATETIMEOFFSET", ColumnEncryptionRandomized, dt},
 		{"datetime2(7)", "DATETIME2", ColumnEncryptionDeterministic, civil.DateTimeOf(dt)},
 		{"nvarchar(max)", "NVARCHAR", ColumnEncryptionRandomized, NVarCharMax("nvarcharmaxval")},
-		// TODO: The driver throws away type information about Valuer implementations and sends nil as nvarchar(1). Fix that.
-		// {"int", "INT", ColumnEncryptionDeterministic, sql.NullInt32{Valid: false}},
+		{"int", "INT", ColumnEncryptionDeterministic, sql.NullInt32{Valid: false}},
+		{"bigint", "BIGINT", ColumnEncryptionDeterministic, sql.NullInt64{Int64: 128, Valid: true}},
+		{"uniqueidentifier", "UNIQUEIDENTIFIER", ColumnEncryptionRandomized, UniqueIdentifier{0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF}},
+		{"uniqueidentifier", "UNIQUEIDENTIFIER", ColumnEncryptionRandomized, NullUniqueIdentifier{Valid: false}},
 	}
 	for _, test := range providerTests {
 		// turn off key caching
@@ -230,13 +233,19 @@ func comparisonValueFromObject(object interface{}) string {
 	case time.Time:
 		return civil.DateTimeOf(v).String()
 		//return v.Format(time.RFC3339)
-	case fmt.Stringer:
-		return v.String()
 	case bool:
 		if v == true {
 			return "1"
 		}
 		return "0"
+	case driver.Valuer:
+		val, _ := v.Value()
+		if val == nil {
+			return "<nil>"
+		}
+		return comparisonValueFromObject(val)
+	case fmt.Stringer:
+		return v.String()
 	default:
 		return fmt.Sprintf("%v", v)
 	}
