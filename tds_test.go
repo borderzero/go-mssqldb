@@ -694,6 +694,72 @@ func TestBadCredentials(t *testing.T) {
 	_ = testConnectionBad(t, params.URL().String())
 }
 
+func TestLeakedConnections(t *testing.T) {
+	goodParams := testConnParams(t)
+	badParams := testConnParams(t)
+	badParams.Database = "unknown_db"
+
+	// Connecting with good credentials should not fail
+	goodConn, err := sql.Open("sqlserver", goodParams.URL().String())
+	if err != nil {
+		t.Fatal("Open connection failed:", err.Error())
+	}
+	err = goodConn.Ping()
+	if err != nil {
+		t.Fatal("Ping with good credentials should not fail, but got error:", err.Error())
+	}
+
+	var localNetAddr sql.NullString
+	err = goodConn.QueryRow("SELECT local_net_address FROM sys.dm_exec_connections WHERE session_id=@@SPID").Scan(&localNetAddr)
+	if err != nil {
+		t.Fatal("cannot scan local_net_address value", err)
+	}
+
+	// Remember the number of open connections from local_net_address, excluding the current one
+	// NULL value is possible, particularly for non-tcp local connections
+	var openConnections int
+	err = goodConn.QueryRow(`
+		SELECT COUNT(*) AS openConnections 
+		FROM sys.dm_exec_connections 
+		WHERE session_id != @@SPID 
+		AND ((@p1 IS NULL AND local_net_address IS NULL) 
+			OR local_net_address = @p1)`,
+		localNetAddr).Scan(&openConnections)
+	if err != nil {
+		t.Fatal("cannot scan value", err)
+	}
+
+	// Open 10 connections to the unknown database, all should be closed immediately
+	for i := 0; i < 10; i++ {
+		conn, err := sql.Open("sqlserver", badParams.URL().String())
+		if err != nil {
+			// should not fail here
+			t.Fatal("sql.Open failed:", err.Error())
+		}
+		err = conn.Ping()
+		if err == nil {
+			t.Fatalf("Pinging %s should fail, but it succeeded", badParams.Database)
+		}
+		conn.Close() // force close the connection
+	}
+
+	// Check if the number of open connections is the same as before
+	var newOpenConnections int
+	err = goodConn.QueryRow(`
+		SELECT COUNT(*) AS openConnections 
+		FROM sys.dm_exec_connections 
+		WHERE session_id != @@SPID 
+		AND ((@p1 IS NULL AND local_net_address IS NULL) 
+			OR local_net_address = @p1)`,
+		localNetAddr).Scan(&newOpenConnections)
+	if err != nil {
+		t.Fatal("cannot scan value", err)
+	}
+	if openConnections != newOpenConnections {
+		t.Fatalf("Number of open connections should be the same as before, %d leaked connections found", newOpenConnections-openConnections)
+	}
+}
+
 func TestBadHost(t *testing.T) {
 	params := testConnParams(t)
 	params.Host = "badhost"
