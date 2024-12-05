@@ -270,9 +270,7 @@ func processEnvChg(ctx context.Context, sess *tdsSession) []byte {
 			if err != nil {
 				badStreamPanic(err)
 			}
-			if sess.logFlags&logTransaction != 0 {
-				sess.logger.Log(ctx, msdsn.LogTransaction, fmt.Sprintf("BEGIN TRANSACTION %x", sess.tranid))
-			}
+			sess.LogF(ctx, msdsn.LogTransaction, "BEGIN TRANSACTION %x", sess.tranid)
 			_, err = readBVarByte(r)
 			if err != nil {
 				badStreamPanic(err)
@@ -286,12 +284,10 @@ func processEnvChg(ctx context.Context, sess *tdsSession) []byte {
 			if err != nil {
 				badStreamPanic(err)
 			}
-			if sess.logFlags&logTransaction != 0 {
-				if envtype == envTypCommitTran {
-					sess.logger.Log(ctx, msdsn.LogTransaction, fmt.Sprintf("COMMIT TRANSACTION %x", sess.tranid))
-				} else {
-					sess.logger.Log(ctx, msdsn.LogTransaction, fmt.Sprintf("ROLLBACK TRANSACTION %x", sess.tranid))
-				}
+			if envtype == envTypCommitTran {
+				sess.LogF(ctx, msdsn.LogTransaction, "COMMIT TRANSACTION %x", sess.tranid)
+			} else {
+				sess.LogF(ctx, msdsn.LogTransaction, "ROLLBACK TRANSACTION %x", sess.tranid)
 			}
 			sess.tranid = 0
 		case envEnlistDTC:
@@ -405,10 +401,7 @@ func processEnvChg(ctx context.Context, sess *tdsSession) []byte {
 			sess.routedPort = newPort
 		default:
 			// ignore rest of records because we don't know how to skip those
-			if sess.logFlags&logDebug != 0 {
-				sess.logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("WARN: Unknown ENVCHANGE record detected with type id = %d", envtype))
-			}
-
+			sess.LogF(ctx, msdsn.LogDebug, "WARN: Unknown ENVCHANGE record detected with type id = %d", envtype)
 			return buf.Bytes()
 		}
 	}
@@ -958,9 +951,7 @@ func parseReturnValue(r *tdsBuffer, s *tdsSession) (nv namedValue) {
 func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenStruct, outs outputs) {
 	defer func() {
 		if err := recover(); err != nil {
-			if sess.logFlags&logErrors != 0 {
-				sess.logger.Log(ctx, msdsn.LogErrors, fmt.Sprintf("Intercepted panic %v", err))
-			}
+			sess.LogF(ctx, msdsn.LogErrors, "Intercepted panic %v", err)
 			if outs.msgq != nil {
 				var derr error
 				switch e := err.(type) {
@@ -979,9 +970,7 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 	colsReceived := false
 	packet_type, err := sess.buf.BeginRead()
 	if err != nil {
-		if sess.logFlags&logErrors != 0 {
-			sess.logger.Log(ctx, msdsn.LogErrors, fmt.Sprintf("BeginRead failed %v", err))
-		}
+		sess.LogF(ctx, msdsn.LogErrors, "BeginRead failed %v", err)
 		switch e := err.(type) {
 		case *net.OpError:
 			err = e
@@ -999,9 +988,7 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 	errs := make([]Error, 0, 5)
 	for tokens := 0; ; tokens += 1 {
 		token := token(sess.buf.byte())
-		if sess.logFlags&logDebug != 0 {
-			sess.logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("got token %v", token))
-		}
+		sess.LogF(ctx, msdsn.LogDebug, "got token %v", token)
 		switch token {
 		case tokenSSPI:
 			ch <- parseSSPIMsg(sess.buf)
@@ -1026,9 +1013,7 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 
 			ch <- done
 			if done.Status&doneCount != 0 {
-				if sess.logFlags&logRows != 0 {
-					sess.logger.Log(ctx, msdsn.LogRows, fmt.Sprintf("(%d rows affected)", done.RowCount))
-				}
+				sess.LogF(ctx, msdsn.LogRows, "(%d rows affected)", done.RowCount)
 
 				if (colsReceived || done.CurCmd != cmdSelect) && outs.msgq != nil {
 					_ = sqlexp.ReturnMessageEnqueue(ctx, outs.msgq, sqlexp.MsgRowsAffected{Count: int64(done.RowCount)})
@@ -1055,9 +1040,7 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 			if outs.msgq != nil {
 				errs = make([]Error, 0, 5)
 			}
-			if sess.logFlags&logDebug != 0 {
-				sess.logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("got DONE or DONEPROC status=%d", done.Status))
-			}
+			sess.LogF(ctx, msdsn.LogDebug, "got DONE or DONEPROC status=%d", done.Status)
 			if done.Status&doneSrvError != 0 {
 				ch <- ServerError{done.getError()}
 				if outs.msgq != nil {
@@ -1067,9 +1050,7 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 			}
 			ch <- done
 			if done.Status&doneCount != 0 {
-				if sess.logFlags&logRows != 0 {
-					sess.logger.Log(ctx, msdsn.LogRows, fmt.Sprintf("(Rows affected: %d)", done.RowCount))
-				}
+				sess.LogF(ctx, msdsn.LogRows, "(Rows affected: %d)", done.RowCount)
 
 				if (colsReceived || done.CurCmd != cmdSelect) && outs.msgq != nil {
 					_ = sqlexp.ReturnMessageEnqueue(ctx, outs.msgq, sqlexp.MsgRowsAffected{Count: int64(done.RowCount)})
@@ -1118,13 +1099,9 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 			sess.loginEnvBytes = append(sess.loginEnvBytes, tokenBytes...)
 		case tokenError:
 			err := parseError72(sess.buf)
-			if sess.logFlags&logDebug != 0 {
-				sess.logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("got ERROR %d %s", err.Number, err.Message))
-			}
+			sess.LogF(ctx, msdsn.LogDebug, "got ERROR %d %s", err.Number, err.Message)
 			errs = append(errs, err)
-			if sess.logFlags&logErrors != 0 {
-				sess.logger.Log(ctx, msdsn.LogErrors, err.Message)
-			}
+			sess.LogS(ctx, msdsn.LogErrors, err.Message)
 			if outs.msgq != nil {
 				_ = sqlexp.ReturnMessageEnqueue(ctx, outs.msgq, sqlexp.MsgError{Error: err})
 			}
@@ -1138,6 +1115,7 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 
 			sess.loginEnvBytes = append(sess.loginEnvBytes, []byte{byte(tokenInfo), byte(length & 0xFF), byte(length >> 8)}...)
 			sess.loginEnvBytes = append(sess.loginEnvBytes, infoBytes...)
+
 		case tokenReturnValue:
 			nv := parseReturnValue(sess.buf, sess)
 			if len(nv.Name) > 0 {

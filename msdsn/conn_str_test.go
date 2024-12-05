@@ -105,9 +105,8 @@ func TestValidConnectionString(t *testing.T) {
 		{"disableretry=1", func(p Config) bool { return p.DisableRetry }},
 		{"disableretry=0", func(p Config) bool { return !p.DisableRetry }},
 		{"", func(p Config) bool { return p.DisableRetry == disableRetryDefault }},
-		{"MultiSubnetFailover=true", func(p Config) bool { return p.MultiSubnetFailover }},
+		{"MultiSubnetFailover=true;NoTraceID=true", func(p Config) bool { return p.MultiSubnetFailover && p.NoTraceID }},
 		{"MultiSubnetFailover=false", func(p Config) bool { return !p.MultiSubnetFailover }},
-
 		// those are supported currently, but maybe should not be
 		{"someparam", func(p Config) bool { return true }},
 		{";;=;", func(p Config) bool { return true }},
@@ -226,6 +225,9 @@ func TestConnParseRoundTripFixed(t *testing.T) {
 	if err != nil {
 		t.Fatal("Params after roundtrip are not valid", err)
 	}
+	t.Log("params.URL " + params.URL().String())
+	params.ActivityID = nil
+	rtParams.ActivityID = nil
 	if !reflect.DeepEqual(params, rtParams) {
 		t.Fatal("Parameters do not match after roundtrip", params, rtParams)
 	}
