@@ -475,7 +475,7 @@ func (s *tdsSession) ParseRPC() ([]headerStruct, procId, uint16, []param, []inte
 		return nil, procId{}, 0, nil, nil, err
 	}
 
-	params, values, err := parseParams(s.buf)
+	params, values, err := parseParams(s.buf, s.encoding)
 	if err != nil {
 		return nil, procId{}, 0, nil, nil, err
 	}
@@ -483,7 +483,7 @@ func (s *tdsSession) ParseRPC() ([]headerStruct, procId, uint16, []param, []inte
 	return headers, proc, flags, params, values, nil
 }
 
-func parseParams(b *tdsBuffer) ([]param, []interface{}, error) {
+func parseParams(b *tdsBuffer, encoding msdsn.EncodeParameters) ([]param, []interface{}, error) {
 	var params []param
 	var values []interface{}
 	for {
@@ -505,7 +505,7 @@ func parseParams(b *tdsBuffer) ([]param, []interface{}, error) {
 		}
 
 		p.Flags = flags
-		p.ti = readTypeInfo(b, b.byte(), nil)
+		p.ti = readTypeInfo(b, b.byte(), nil, encoding)
 		val := p.ti.Reader(&p.ti, b, nil)
 		p.buffer = p.ti.Buffer
 		params = append(params, p)
@@ -673,7 +673,7 @@ func (c *Client) SendSqlBatch(ctx context.Context, serverConn *ServerSession, qu
 }
 
 func (c *Client) SendRpc(ctx context.Context, serverConn *ServerSession, headers []headerStruct, proc procId, flags uint16, params []param, resetSession bool) ([]doneStruct, error) {
-	if err := sendRpc(c.Conn.sess.buf, headers, proc, flags, params, resetSession); err != nil {
+	if err := sendRpc(c.Conn.sess.buf, headers, proc, flags, params, resetSession, c.Conn.sess.encoding); err != nil {
 		return nil, err
 	}
 

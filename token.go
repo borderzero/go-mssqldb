@@ -1106,19 +1106,11 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 				_ = sqlexp.ReturnMessageEnqueue(ctx, outs.msgq, sqlexp.MsgError{Error: err})
 			}
 		case tokenInfo:
-<<<<<<< HEAD
-			info := parseInfo(sess.buf)
-			sess.LogF(ctx, msdsn.LogDebug, "got INFO %d %s", info.Number, info.Message)
-			sess.LogS(ctx, msdsn.LogMessages, info.Message)
-			if outs.msgq != nil {
-				_ = sqlexp.ReturnMessageEnqueue(ctx, outs.msgq, sqlexp.MsgNotice{Message: info})
-=======
 			length := sess.buf.uint16()
 			infoBytes := make([]byte, length)
 			_, err := sess.buf.Read(infoBytes)
 			if err != nil {
 				badStreamPanic(err)
->>>>>>> 1158ce2 (proxy changes)
 			}
 
 			sess.loginEnvBytes = append(sess.loginEnvBytes, []byte{byte(tokenInfo), byte(length & 0xFF), byte(length >> 8)}...)
