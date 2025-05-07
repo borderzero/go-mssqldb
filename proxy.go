@@ -505,7 +505,7 @@ func parseParams(b *tdsBuffer) ([]param, []interface{}, error) {
 		}
 
 		p.Flags = flags
-		p.ti = readTypeInfo(b, b.byte(), nil, b.serverConn.encoding)
+		p.ti = readTypeInfo(b, b.byte(), nil, msdsn.EncodeParameters{})
 		val := p.ti.Reader(&p.ti, b, nil)
 		p.buffer = p.ti.Buffer
 		params = append(params, p)
