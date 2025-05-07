@@ -505,7 +505,7 @@ func parseParams(b *tdsBuffer) ([]param, []interface{}, error) {
 		}
 
 		p.Flags = flags
-		p.ti = readTypeInfo(b, b.byte(), nil)
+		p.ti = readTypeInfo(b, b.byte(), nil, b.serverConn.encoding)
 		val := p.ti.Reader(&p.ti, b, nil)
 		p.buffer = p.ti.Buffer
 		params = append(params, p)
@@ -673,7 +673,7 @@ func (c *Client) SendSqlBatch(ctx context.Context, serverConn *ServerSession, qu
 }
 
 func (c *Client) SendRpc(ctx context.Context, serverConn *ServerSession, headers []headerStruct, proc procId, flags uint16, params []param, resetSession bool) ([]doneStruct, error) {
-	if err := sendRpc(c.Conn.sess.buf, headers, proc, flags, params, resetSession); err != nil {
+	if err := sendRpc(c.Conn.sess.buf, headers, proc, flags, params, resetSession, serverConn.encoding); err != nil {
 		return nil, err
 	}
 
