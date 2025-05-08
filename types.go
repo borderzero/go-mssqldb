@@ -516,6 +516,8 @@ func readShortLenType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{}
 	if size == 0xffff {
 		return nil
 	}
+	ti.Size = int(size)
+	ti.Buffer = make([]byte, ti.Size)
 	r.ReadFull(ti.Buffer[:size])
 	buf := ti.Buffer[:size]
 	switch ti.TypeId {
@@ -586,24 +588,24 @@ func readLongLenType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{} 
 	panic("shoulnd't get here")
 }
 func writeLongLenType(w io.Writer, ti typeInfo, buf []byte) (err error) {
-	//textptr
-	err = binary.Write(w, binary.LittleEndian, byte(0x10))
-	if err != nil {
-		return
-	}
-	err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
-	if err != nil {
-		return
-	}
-	err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
-	if err != nil {
-		return
-	}
-	//timestamp?
-	err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
-	if err != nil {
-		return
-	}
+	// //textptr
+	// err = binary.Write(w, binary.LittleEndian, byte(0x10))
+	// if err != nil {
+	//      return
+	// }
+	// err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
+	// if err != nil {
+	//      return
+	// }
+	// err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
+	// if err != nil {
+	//      return
+	// }
+	// //timestamp?
+	// err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
+	// if err != nil {
+	//      return
+	// }
 
 	err = binary.Write(w, binary.LittleEndian, uint32(ti.Size))
 	if err != nil {
