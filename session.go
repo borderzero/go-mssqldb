@@ -44,14 +44,16 @@ func (s *tdsSession) preparePreloginFields(ctx context.Context, p msdsn.Config, 
 	case msdsn.EncryptionStrict:
 		encrypt = encryptStrict
 	}
-	v := getDriverVersion(driverVersion)
+	// v := getDriverVersion(driverVersion)
 	fields := map[uint8][]byte{
 		// 4 bytes for version and 2 bytes for minor version
-		preloginVERSION:    {byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24), 0, 0},
+		// preloginVERSION:    {byte(v), byte(v >> 8), byte(v >> 16), byte(v >> 24), 0, 0},
+		preloginVERSION:    {0x05, 0x0F, 0x5D, 0xDB, 0x02, 0x00},
 		preloginENCRYPTION: {encrypt},
 		preloginINSTOPT:    instance_buf,
-		preloginTHREADID:   {0, 0, 0, 0},
+		preloginTHREADID:   {0, 0, 0, 33},
 		preloginMARS:       {0}, // MARS disabled
+		// preloginFEDAUTHREQUIRED: {0}, // FedAuth not required
 	}
 
 	if !p.NoTraceID {
