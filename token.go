@@ -35,6 +35,7 @@ const (
 	tokenRow           token = 209 // 0xd1
 	tokenNbcRow        token = 210 // 0xd2
 	tokenEnvChange     token = 227 // 0xE3
+	tokenSessionState  token = 228 // 0xE4
 	tokenSSPI          token = 237 // 0xED
 	tokenFedAuthInfo   token = 238 // 0xEE
 	tokenDone          token = 253 // 0xFD
@@ -141,17 +142,35 @@ func (d doneStruct) getError() Error {
 
 type doneInProcStruct doneStruct
 
+type envChange struct {
+	data []byte
+}
+
+type loginToken struct {
+	token token
+	data  []byte
+}
+
 // ENVCHANGE stream
 // http://msdn.microsoft.com/en-us/library/dd303449.aspx
-func processEnvChg(ctx context.Context, sess *tdsSession) {
+func processEnvChg(ctx context.Context, sess *tdsSession) []byte {
 	size := sess.buf.uint16()
-	r := &io.LimitedReader{R: sess.buf, N: int64(size)}
+	rb := &io.LimitedReader{R: sess.buf, N: int64(size)}
+
+	buf := new(bytes.Buffer)
+	_, err := io.Copy(buf, rb)
+	if err != nil {
+		badStreamPanic(err)
+	}
+
+	r := bytes.NewReader(buf.Bytes())
+
 	for {
 		var err error
 		var envtype uint8
 		err = binary.Read(r, binary.LittleEndian, &envtype)
 		if err == io.EOF {
-			return
+			return buf.Bytes()
 		}
 		if err != nil {
 			badStreamPanic(err)
@@ -392,7 +411,7 @@ func processEnvChg(ctx context.Context, sess *tdsSession) {
 		default:
 			// ignore rest of records because we don't know how to skip those
 			sess.LogF(ctx, msdsn.LogDebug, "WARN: Unknown ENVCHANGE record detected with type id = %d", envtype)
-			return
+			return buf.Bytes()
 		}
 	}
 }
@@ -542,15 +561,30 @@ type colAckStruct struct {
 	EnclaveType string
 }
 
+type sessionRecoveryAckStruct struct {
+	data []byte
+}
+
 type featureExtAck map[byte]interface{}
 
 func parseFeatureExtAck(r *tdsBuffer) featureExtAck {
+	// fmt.Printf("Parsing FeatureExtAck\n")
+	// fmt.Printf("Preview: %x\n", r.rbuf[r.rpos:r.rpos+16])
+
 	ack := map[byte]interface{}{}
 
 	for feature := r.byte(); feature != featExtTERMINATOR; feature = r.byte() {
 		length := r.uint32()
-
+		// fmt.Printf("Feature %d, length %d\n", feature, length)
 		switch feature {
+		case featExtSESSIONRECOVERY:
+			data := make([]byte, length)
+			r.ReadFull(data)
+			sessionRecoveryAck := sessionRecoveryAckStruct{
+				data: data,
+			}
+			ack[feature] = sessionRecoveryAck
+			length -= uint32(len(data))
 		case featExtFEDAUTH:
 			// In theory we need to know the federated authentication library to
 			// know how to parse, but the alternatives provide compatible structures.
@@ -581,15 +615,182 @@ func parseFeatureExtAck(r *tdsBuffer) featureExtAck {
 
 			}
 			ack[feature] = colAck
+		case featExtDATACLASSIFICATION:
+			data := make([]byte, length)
+			r.ReadFull(data)
+			sessionRecoveryAck := sessionRecoveryAckStruct{
+				data: data,
+			}
+			ack[feature] = sessionRecoveryAck
+			length -= uint32(len(data))
+		case featExtUTF8SUPPORT:
+			data := make([]byte, length)
+			r.ReadFull(data)
+			sessionRecoveryAck := sessionRecoveryAckStruct{
+				data: data,
+			}
+			ack[feature] = sessionRecoveryAck
+			length -= uint32(len(data))
+		default:
+			// skip unknown feature
+			fmt.Printf("Unknown feature %d, length %d\n", feature, length)
 		}
 
 		// Skip unprocessed bytes
 		if length > 0 {
+			fmt.Printf("Skipping %d bytes\n", length)
 			io.CopyN(io.Discard, r, int64(length))
 		}
 	}
 
 	return ack
+}
+
+// writeFeatureExtAck writes the FeatureExtAck structure to the given io.Writer.
+// It reverses the logic of parseFeatureExtAck.
+func writeFeatureExtAck(w io.Writer, ack featureExtAck) error {
+	// Helper to write a single byte
+	writeByte := func(b byte) error {
+		buf := []byte{b}
+		_, err := w.Write(buf)
+		return err
+	}
+	// Helper to write uint32 little endian
+	writeUint32 := func(v uint32) error {
+		var buf [4]byte
+		binary.LittleEndian.PutUint32(buf[:], v)
+		_, err := w.Write(buf[:])
+		return err
+	}
+	for feat, val := range ack {
+		switch feat {
+		case featExtSESSIONRECOVERY:
+			sessionRecoveryAck, _ := val.(sessionRecoveryAckStruct)
+			length := uint32(len(sessionRecoveryAck.data))
+			if err := writeByte(featExtSESSIONRECOVERY); err != nil {
+				return err
+			}
+			if err := writeUint32(length); err != nil {
+				return err
+			}
+			if _, err := w.Write(sessionRecoveryAck.data); err != nil {
+				return err
+			}
+		case featExtFEDAUTH:
+			fedAuth, _ := val.(fedAuthAckStruct)
+			// Calculate length: 32 for Nonce if present, 32 for Signature if present
+			var length uint32
+			if len(fedAuth.Nonce) > 0 {
+				length += 32
+			}
+			if len(fedAuth.Signature) > 0 {
+				length += 32
+			}
+			if err := writeByte(featExtFEDAUTH); err != nil {
+				return err
+			}
+			if err := writeUint32(length); err != nil {
+				return err
+			}
+			if len(fedAuth.Nonce) > 0 {
+				nonce := fedAuth.Nonce
+				if len(nonce) > 32 {
+					nonce = nonce[:32]
+				}
+				if len(nonce) < 32 {
+					tmp := make([]byte, 32)
+					copy(tmp, nonce)
+					nonce = tmp
+				}
+				if _, err := w.Write(nonce); err != nil {
+					return err
+				}
+			}
+			if len(fedAuth.Signature) > 0 {
+				sig := fedAuth.Signature
+				if len(sig) > 32 {
+					sig = sig[:32]
+				}
+				if len(sig) < 32 {
+					tmp := make([]byte, 32)
+					copy(tmp, sig)
+					sig = tmp
+				}
+				if _, err := w.Write(sig); err != nil {
+					return err
+				}
+			}
+		case featExtCOLUMNENCRYPTION:
+			// // COLUMNENCRYPTION feature
+			// if val, ok := ack[featExtCOLUMNENCRYPTION]; ok {
+			colAck, _ := val.(colAckStruct)
+			// Calculate length: 1 for version, 0 or more for enclave type
+			var enclaveBytes []byte
+			var enclaveLen byte
+			if colAck.EnclaveType != "" {
+				// Encode as UCS-2 (UTF-16LE, no BOM)
+				enc := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewEncoder()
+				ucs2, err := enc.Bytes([]byte(colAck.EnclaveType))
+				if err == nil {
+					enclaveBytes = ucs2
+					enclaveLen = byte(len(ucs2) / 2)
+				}
+			}
+			length := uint32(1) // version
+			if len(enclaveBytes) > 0 {
+				length += 1 + uint32(len(enclaveBytes))
+			}
+			if err := writeByte(featExtCOLUMNENCRYPTION); err != nil {
+				return err
+			}
+			if err := writeUint32(length); err != nil {
+				return err
+			}
+			if err := writeByte(byte(colAck.Version)); err != nil {
+				return err
+			}
+			if len(enclaveBytes) > 0 {
+				if err := writeByte(enclaveLen); err != nil {
+					return err
+				}
+				if _, err := w.Write(enclaveBytes); err != nil {
+					return err
+				}
+			}
+		case featExtDATACLASSIFICATION:
+			sessionRecoveryAck, _ := val.(sessionRecoveryAckStruct)
+			length := uint32(len(sessionRecoveryAck.data))
+			if err := writeByte(featExtDATACLASSIFICATION); err != nil {
+				return err
+			}
+			if err := writeUint32(length); err != nil {
+				return err
+			}
+			if _, err := w.Write(sessionRecoveryAck.data); err != nil {
+				return err
+			}
+		case featExtUTF8SUPPORT:
+			sessionRecoveryAck, _ := val.(sessionRecoveryAckStruct)
+			length := uint32(len(sessionRecoveryAck.data))
+			if err := writeByte(featExtUTF8SUPPORT); err != nil {
+				return err
+			}
+			if err := writeUint32(length); err != nil {
+				return err
+			}
+			if _, err := w.Write(sessionRecoveryAck.data); err != nil {
+				return err
+			}
+		default:
+			// Skip unknown feature
+			fmt.Printf("Unknown feature %d, length %d\n", feat, 0)
+		}
+	}
+	// Always terminate with featExtTERMINATOR (0xFF)
+	if err := writeByte(featExtTERMINATOR); err != nil {
+		return err
+	}
+	return nil
 }
 
 // http://msdn.microsoft.com/en-us/library/dd357363.aspx
@@ -975,10 +1176,19 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 		badStreamPanic(fmt.Errorf("unexpected packet type in reply: got %v, expected %v", packet_type, packReply))
 	}
 	var columns []columnStruct
+	var loginTokens []tokenStruct
 	errs := make([]Error, 0, 5)
 	for tokens := 0; ; tokens += 1 {
+		// FIXME: REMOVE
+		if sess.border0DebugLogs {
+			fmt.Println("reading next token")
+		}
 		token := token(sess.buf.byte())
 		sess.LogF(ctx, msdsn.LogDebug, "got token %v", token)
+		// FIXME: REMOVE
+		if sess.border0DebugLogs {
+			fmt.Println("got token", token)
+		}
 		switch token {
 		case tokenSSPI:
 			ch <- parseSSPIMsg(sess.buf)
@@ -988,15 +1198,19 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 			return
 		case tokenReturnStatus:
 			returnStatus := parseReturnStatus(sess.buf)
+			loginTokens = append(loginTokens, tokenReturnStatus)
 			ch <- returnStatus
 		case tokenLoginAck:
 			loginAck := parseLoginAck(sess.buf)
+			loginTokens = append(loginTokens, loginAck)
 			ch <- loginAck
 		case tokenFeatureExtAck:
 			featureExtAck := parseFeatureExtAck(sess.buf)
+			loginTokens = append(loginTokens, featureExtAck)
 			ch <- featureExtAck
 		case tokenOrder:
 			order := parseOrder(sess.buf)
+			loginTokens = append(loginTokens, tokenOrder)
 			ch <- order
 		case tokenDoneInProc:
 			done := parseDoneInProc(sess.buf)
@@ -1026,6 +1240,7 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 			}
 		case tokenDone, tokenDoneProc:
 			done := parseDone(sess.buf)
+			loginTokens = append(loginTokens, done)
 			done.errors = errs
 			if outs.msgq != nil {
 				errs = make([]Error, 0, 5)
@@ -1057,6 +1272,7 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 				if outs.msgq != nil {
 					_ = sqlexp.ReturnMessageEnqueue(ctx, outs.msgq, sqlexp.MsgNextResultSet{})
 				}
+				sess.loginTokens = loginTokens
 				return
 			}
 		case tokenColMetadata:
@@ -1084,9 +1300,15 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 			}
 			ch <- row
 		case tokenEnvChange:
-			processEnvChg(ctx, sess)
+			tokenBytes := processEnvChg(ctx, sess)
+			loginTokens = append(loginTokens, envChange{
+				data: tokenBytes,
+			})
+			// sess.loginEnvBytes = append(sess.loginEnvBytes, []byte{byte(tokenEnvChange), byte(len(tokenBytes) & 0xFF), byte(len(tokenBytes) >> 8)}...)
+			// sess.loginEnvBytes = append(sess.loginEnvBytes, tokenBytes...)
 		case tokenError:
 			err := parseError72(sess.buf)
+			loginTokens = append(loginTokens, err)
 			sess.LogF(ctx, msdsn.LogDebug, "got ERROR %d %s", err.Number, err.Message)
 			errs = append(errs, err)
 			sess.LogS(ctx, msdsn.LogErrors, err.Message)
@@ -1094,12 +1316,41 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 				_ = sqlexp.ReturnMessageEnqueue(ctx, outs.msgq, sqlexp.MsgError{Error: err})
 			}
 		case tokenInfo:
-			info := parseInfo(sess.buf)
-			sess.LogF(ctx, msdsn.LogDebug, "got INFO %d %s", info.Number, info.Message)
-			sess.LogS(ctx, msdsn.LogMessages, info.Message)
-			if outs.msgq != nil {
-				_ = sqlexp.ReturnMessageEnqueue(ctx, outs.msgq, sqlexp.MsgNotice{Message: info})
+			// FIXME: REMOVE
+			if sess.border0DebugLogs {
+				fmt.Printf("got INFO\n")
 			}
+			length := sess.buf.uint16()
+			// FIXME: REMOVE
+			if sess.border0DebugLogs {
+				fmt.Printf("got INFO length %d\n", length)
+			}
+			infoBytes := make([]byte, length)
+			_, err := sess.buf.Read(infoBytes)
+			tokenInfo := loginToken{
+				token: tokenInfo,
+				data:  infoBytes,
+			}
+			if err != nil {
+				// FIXME: REMOVE
+				if sess.border0DebugLogs {
+					fmt.Printf("got INFO read error %v\n", err)
+				}
+				badStreamPanic(err)
+			}
+
+			// fmt.Printf("got INFO bytes %v\n", infoBytes)
+
+			// // create a reader for the info bytes
+			// r := bytes.NewReader(infoBytes)
+			// tokenInfo := parseInfo(sess.buf)
+			// FIXME: REMOVE
+			if sess.border0DebugLogs {
+				fmt.Printf("got INFO token %v\n", tokenInfo)
+			}
+			loginTokens = append(loginTokens, tokenInfo)
+			// sess.loginEnvBytes = append(sess.loginEnvBytes, []byte{byte(tokenInfo), byte(length & 0xFF), byte(length >> 8)}...)
+			// sess.loginEnvBytes = append(sess.loginEnvBytes, infoBytes...)
 		case tokenReturnValue:
 			nv := parseReturnValue(sess.buf, sess)
 			if len(nv.Name) > 0 {
@@ -1107,7 +1358,10 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 				if ov, has := outs.params[name]; has {
 					err = scanIntoOut(name, nv.Value, ov)
 					if err != nil {
-						fmt.Println("scan error", err)
+						// FIXME: REMOVE
+						if sess.border0DebugLogs {
+							fmt.Println("scan error", err)
+						}
 						ch <- err
 					}
 				}

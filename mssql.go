@@ -239,6 +239,10 @@ type Conn struct {
 	outs outputs
 }
 
+func (c *Conn) Spid() uint16 {
+	return c.sess.buf.rSpid
+}
+
 type outputs struct {
 	params       map[string]interface{}
 	returnStatus *ReturnStatus
