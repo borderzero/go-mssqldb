@@ -516,6 +516,8 @@ func readShortLenType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{}
 	if size == 0xffff {
 		return nil
 	}
+	ti.Size = int(size)
+	ti.Buffer = make([]byte, ti.Size)
 	r.ReadFull(ti.Buffer[:size])
 	buf := ti.Buffer[:size]
 	switch ti.TypeId {
@@ -560,9 +562,7 @@ func readLongLenType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{} 
 	// and here:
 	// http://msdn.microsoft.com/en-us/library/dd357254.aspx
 	textptrsize := int(r.byte())
-	if textptrsize == 0 {
-		return nil
-	}
+
 	textptr := make([]byte, textptrsize)
 	r.ReadFull(textptr)
 	timestamp := r.uint64()
@@ -571,6 +571,7 @@ func readLongLenType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{} 
 	if size == -1 {
 		return nil
 	}
+
 	buf := make([]byte, size)
 	r.ReadFull(buf)
 	switch ti.TypeId {
@@ -586,29 +587,30 @@ func readLongLenType(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata) interface{} 
 	panic("shoulnd't get here")
 }
 func writeLongLenType(w io.Writer, ti typeInfo, buf []byte) (err error) {
-	//textptr
-	err = binary.Write(w, binary.LittleEndian, byte(0x10))
-	if err != nil {
-		return
-	}
-	err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
-	if err != nil {
-		return
-	}
-	err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
-	if err != nil {
-		return
-	}
-	//timestamp?
-	err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
-	if err != nil {
-		return
-	}
+	// //textptr
+	// err = binary.Write(w, binary.LittleEndian, byte(0x10))
+	// if err != nil {
+	// 	return
+	// }
+	// err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
+	// if err != nil {
+	// 	return
+	// }
+	// err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
+	// if err != nil {
+	// 	return
+	// }
+	// //timestamp?
+	// err = binary.Write(w, binary.LittleEndian, uint64(0xFFFFFFFFFFFFFFFF))
+	// if err != nil {
+	// 	return
+	// }
 
 	err = binary.Write(w, binary.LittleEndian, uint32(ti.Size))
 	if err != nil {
 		return
 	}
+
 	_, err = w.Write(buf)
 	return
 }
@@ -796,6 +798,29 @@ func writePLPType(w io.Writer, ti typeInfo, buf []byte) (err error) {
 	}
 }
 
+// func readVarLen(dest interface{}, b *tdsBuffer, ti *typeInfo) error {
+// 	fmt.Printf("[readVarLen] called with rpos=%d, rsize=%d\n", b.rpos, b.rsize)
+// 	start := b.rpos
+
+// 	// NVARCHAR and similar types start with a 2-byte length prefix
+// 	if b.rpos+2 > b.rsize {
+// 		fmt.Printf("[readVarLen] not enough bytes for length prefix: rpos=%d, rsize=%d\n", b.rpos, b.rsize)
+// 		badStreamPanic("readVarLen: unexpected EOF reading length prefix")
+// 	}
+// 	length := int(b.uint16())
+// 	fmt.Printf("[readVarLen] length prefix: %d (from rpos %d to %d)\n", length, start, b.rpos)
+
+// 	if b.rpos+length > b.rsize {
+// 		fmt.Printf("[readVarLen] not enough data: need %d more bytes, only %d available\n", length, b.rsize-b.rpos)
+// 		badStreamPanic("readVarLen: unexpected EOF reading value")
+// 	}
+
+// 	fmt.Printf("[readVarLen] about to read %d bytes (rpos=%d)\n", length, b.rpos)
+// 	// proceed with original logic (not shown here)
+
+// 	return nil // placeholder — replace with original logic if needed
+// }
+
 func readVarLen(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata, encoding msdsn.EncodeParameters) {
 	switch ti.TypeId {
 	case typeDateN:
@@ -876,6 +901,7 @@ func readVarLen(ti *typeInfo, r *tdsBuffer, c *cryptoMetadata, encoding msdsn.En
 	case typeText, typeImage, typeNText, typeVariant:
 		// LONGLEN_TYPE
 		ti.Size = int(r.int32())
+
 		switch ti.TypeId {
 		case typeText, typeNText:
 			ti.Collation = readCollation(r)

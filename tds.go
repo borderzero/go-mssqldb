@@ -176,6 +176,9 @@ type tdsSession struct {
 	connid          UniqueIdentifier
 	activityid      UniqueIdentifier
 	encoding        msdsn.EncodeParameters
+	// loginEnvBytes   []byte
+	loginTokens []tokenStruct
+	id          string
 }
 
 type alwaysEncryptedSettings struct {
@@ -364,8 +367,13 @@ func readPreloginOptionData(plOption *preloginOption, buffer []byte) ([]byte, er
 // OptionFlags1
 // http://msdn.microsoft.com/en-us/library/dd304019.aspx
 const (
-	fUseDB   = 0x20
-	fSetLang = 0x80
+	fByteOrder = 1 << 0 // 0x01: use big-endian
+	fChar      = 1 << 1 // 0x02: use EBCDIC
+	fFloat     = 1 << 2 // 0x04: use VAX (or ND5000 if combined with 0x08)
+	fDumpLoad  = 1 << 4 // 0x10: enable BCP
+	fUseDB     = 1 << 5 // 0x20
+	fDatabase  = 1 << 6 // 0x40
+	fSetLang   = 1 << 7 // 0x80
 )
 
 // OptionFlags2
@@ -528,6 +536,64 @@ func (e *featureExtFedAuth) toBytes() []byte {
 	}
 
 	return d
+}
+
+// SESSIONRECOVERY feature extension
+type featureExtSessionRecovery struct {
+}
+
+func (f *featureExtSessionRecovery) featureID() byte {
+	return featExtSESSIONRECOVERY
+}
+
+func (f *featureExtSessionRecovery) toBytes() []byte {
+	return nil // SESSIONRECOVERY with zero length indicates preference
+}
+
+// GLOBALTRANSACTIONS feature extension
+type featureExtGlobalTransactions struct{}
+
+func (f *featureExtGlobalTransactions) featureID() byte {
+	return featExtGLOBALTRANSACTIONS
+}
+
+func (f *featureExtGlobalTransactions) toBytes() []byte {
+	return nil
+}
+
+// DATACLASSIFICATION feature extension
+type featureExtDataClassification struct {
+	version uint8
+}
+
+func (f *featureExtDataClassification) featureID() byte {
+	return featExtDATACLASSIFICATION
+}
+
+func (f *featureExtDataClassification) toBytes() []byte {
+	return []byte{0x02}
+}
+
+// UTF8_SUPPORT feature extension
+type featureExtUTF8Support struct{}
+
+func (f *featureExtUTF8Support) featureID() byte {
+	return featExtUTF8SUPPORT
+}
+
+func (f *featureExtUTF8Support) toBytes() []byte {
+	return nil // Can be []byte{0x01} to indicate support, but left nil as it's commonly zero-length
+}
+
+// AZURESQLDNSCACHING feature extension
+type featureExtAzureSQLDNSCaching struct{}
+
+func (f *featureExtAzureSQLDNSCaching) featureID() byte {
+	return 0x0B
+}
+
+func (f *featureExtAzureSQLDNSCaching) toBytes() []byte {
+	return nil
 }
 
 type loginHeader struct {
@@ -1038,28 +1104,45 @@ func prepareLogin(ctx context.Context, c *Connector, p msdsn.Config, logger Cont
 		typeFlags |= fReadOnlyIntent
 	}
 	// We need to include Instance in ServerName field of LOGIN7 record
-	var serverName string
-	if len(p.Instance) > 0 {
-		serverName = p.Host + "\\" + p.Instance
-	} else {
-		serverName = p.Host
-	}
+	// var serverName string
+	// if len(p.Instance) > 0 {
+	// 	serverName = p.Host + "\\" + p.Instance
+	// } else {
+	// 	serverName = p.Host
+	// }
+
+	fmt.Printf("Database: %s\n", p.Database)
 	l = &login{
-		TDSVersion:     TDSVersion,
-		PacketSize:     packetSize,
-		Database:       p.Database,
-		OptionFlags2:   fODBC, // to get unlimited TEXTSIZE
-		OptionFlags1:   fUseDB | fSetLang,
-		HostName:       p.Workstation,
-		ServerName:     serverName,
-		AppName:        p.AppName,
-		TypeFlags:      typeFlags,
-		CtlIntName:     "go-mssqldb",
-		ClientProgVer:  getDriverVersion(driverVersion),
+		TDSVersion:   TDSVersion,
+		PacketSize:   0,
+		Database:     p.Database,
+		OptionFlags2: fODBC | fLanguageFatal, // to get unlimited TEXTSIZE
+		OptionFlags1: fSetLang | fDatabase | fUseDB,
+		// OptionFlags3: fExtension,
+		HostName:   "EC2AMAZ-0K88AA8",
+		ServerName: "tcp:sqltest1,1433",
+		AppName:    "Microsoft SQL Server Management Studio",
+		TypeFlags:  typeFlags,
+		// CtlIntName:     "go-mssqldb",
+		CtlIntName: "Framework Microsoft SqlClient Data Provider",
+		// ClientProgVer:  getDriverVersion(driverVersion),
+		ClientProgVer:  100663296,
 		ChangePassword: p.ChangePassword,
 		ClientPID:      uint32(os.Getpid()),
+		ClientID:       [6]byte{188, 250, 232, 43, 96, 76},
 	}
-	getClientId(&l.ClientID)
+	l.FeatureExt.Add(&featureExtSessionRecovery{})
+	l.FeatureExt.Add(&featureExtColumnEncryption{
+		version: 0x03,
+	})
+	l.FeatureExt.Add(&featureExtGlobalTransactions{})
+	l.FeatureExt.Add(&featureExtDataClassification{
+		version: 0x02,
+	})
+	l.FeatureExt.Add(&featureExtUTF8Support{})
+	l.FeatureExt.Add(&featureExtAzureSQLDNSCaching{})
+
+	// getClientId(&l.ClientID)
 	if p.ColumnEncryption {
 		_ = l.FeatureExt.Add(&featureExtColumnEncryption{})
 	}
@@ -1193,6 +1276,7 @@ initiate_connection:
 	}
 
 	fields := sess.preparePreloginFields(ctx, p, fedAuth)
+	fmt.Printf("Proxy- > Server sending prelogin options %+v\n", fields)
 
 	err = writePrelogin(packPrelogin, outbuf, fields)
 	if err != nil {
@@ -1203,6 +1287,7 @@ initiate_connection:
 	if err != nil {
 		return nil, err
 	}
+	fmt.Printf("Proxy <- Server received prelogin %+v\n", fields)
 
 	encrypt, err := interpretPreloginResponse(p, fedAuth, fields)
 	if err != nil {
@@ -1269,7 +1354,7 @@ initiate_connection:
 	if err != nil {
 		return nil, err
 	}
-
+	fmt.Printf("Proxy -> Server sending login %+v\n", login)
 	err = sendLogin(outbuf, login)
 	if err != nil {
 		return nil, err
@@ -1284,6 +1369,7 @@ initiate_connection:
 		reader.noAttn = true
 
 		for {
+			fmt.Printf("Proxy <- Server waiting for token\n")
 			tok, err := reader.nextToken()
 			if err != nil {
 				return nil, err
@@ -1292,6 +1378,8 @@ initiate_connection:
 			if tok == nil {
 				break
 			}
+
+			fmt.Printf("Proxy <- Server received token %+v\n", tok)
 
 			switch token := tok.(type) {
 			case sspiMsg:
@@ -1334,6 +1422,7 @@ initiate_connection:
 					return nil, err
 				}
 			case loginAckStruct:
+				fmt.Printf("Proxy <- Server received login ack %+v\n", token)
 				sess.loginAck = token
 				loginAck = true
 			case featureExtAck:
@@ -1380,6 +1469,7 @@ initiate_connection:
 }
 
 type featureExtColumnEncryption struct {
+	version uint8
 }
 
 func (f *featureExtColumnEncryption) featureID() byte {
