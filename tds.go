@@ -1098,12 +1098,12 @@ func prepareLogin(ctx context.Context, c *Connector, p msdsn.Config, logger Cont
 		ChangePassword: p.ChangePassword,
 		ClientPID:      uint32(os.Getpid()),
 	}
-	l.FeatureExt.Add(&featureExtSessionRecovery{})
-	l.FeatureExt.Add(&featureExtColumnEncryption{version: 0x03})
-	l.FeatureExt.Add(&featureExtGlobalTransactions{})
-	l.FeatureExt.Add(&featureExtDataClassification{version: 0x02})
-	l.FeatureExt.Add(&featureExtUTF8Support{})
-	l.FeatureExt.Add(&featureExtAzureSQLDNSCaching{})
+	// l.FeatureExt.Add(&featureExtSessionRecovery{})
+	// l.FeatureExt.Add(&featureExtColumnEncryption{version: 0x03})
+	// l.FeatureExt.Add(&featureExtGlobalTransactions{})
+	// l.FeatureExt.Add(&featureExtDataClassification{version: 0x02})
+	// l.FeatureExt.Add(&featureExtUTF8Support{})
+	// l.FeatureExt.Add(&featureExtAzureSQLDNSCaching{})
 	getClientId(&l.ClientID)
 	if p.ColumnEncryption {
 		_ = l.FeatureExt.Add(&featureExtColumnEncryption{})
