@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/microsoft/go-mssqldb/msdsn"
+	"go.uber.org/zap"
 )
 
 const (
@@ -21,98 +22,112 @@ const (
 )
 
 type Client struct {
-	Conn *Conn
-
-	border0DebugLogs bool
+	logger *zap.Logger
+	conn   *Conn
+	debug  bool
 }
 
 type Server struct {
-	ConnTimeout time.Duration
-	PacketSize  uint16
-	Logger      ContextLogger
-	Version     uint32
-	ProgName    string
-	Encryption  byte
-
-	border0DebugLogs bool
-}
-
-type ServerConfig struct {
-	ConnTimeout *time.Duration
-	PacketSize  *uint16
-	Logger      ContextLogger
-	Version     *string
-	Encryption  *string
-	ProgName    *string
+	logger      *zap.Logger
+	connTimeout time.Duration
+	packetSize  uint16
+	version     uint32
+	progName    string
+	encryption  byte
+	debug       bool
 }
 
 type ServerSession struct {
 	*tdsSession
 }
 
-func NewServer(config ServerConfig) (*Server, error) {
-	border0DebugLogs := strings.ToLower(os.Getenv("BORDER0_MSSQL_PROXY_DEBUG")) == "true"
+type ProxyServerOption func(*Server) error
 
-	server := &Server{border0DebugLogs: border0DebugLogs}
+func ProxyServerWithLogger(logger *zap.Logger) ProxyServerOption {
+	return func(s *Server) error { s.logger = logger; return nil }
+}
 
-	if config.PacketSize == nil {
-		server.PacketSize = defaultPacketSize
-	} else {
-		server.PacketSize = *config.PacketSize
+func ProxyServerWithConnTimeout(connTimeout time.Duration) ProxyServerOption {
+	return func(s *Server) error { s.connTimeout = connTimeout; return nil }
+}
+
+func ProxyServerWithPacketSize(packetSize uint16) ProxyServerOption {
+	return func(s *Server) error { s.packetSize = packetSize; return nil }
+}
+
+func ProxyServerWithVersion(version string) ProxyServerOption {
+	return func(s *Server) error { s.version = getDriverVersion(version); return nil }
+}
+
+func ProxyServerWithProgramName(progName string) ProxyServerOption {
+	return func(s *Server) error { s.progName = progName; return nil }
+}
+
+func ProxyServerWithEncryption(encryptionType string) ProxyServerOption {
+	return func(s *Server) (err error) {
+		switch encryptionType {
+		case "strict":
+			s.encryption = encryptStrict
+			return nil
+		case "required":
+			s.encryption = encryptReq
+			return nil
+		case "on":
+			s.encryption = encryptOn
+			return nil
+		case "off":
+			s.encryption = encryptOff
+			return nil
+		default:
+			return fmt.Errorf("invalid encryption type option %s, valid values are [ strict, required, on, off ]", encryptionType)
+		}
 	}
+}
+
+func ProxyServerWithDebug(debug bool) ProxyServerOption {
+	return func(s *Server) (err error) { s.debug = debug; return nil }
+}
+
+func NewProxyServer(opts ...ProxyServerOption) (*Server, error) {
+	server := &Server{
+		logger:      zap.NewNop(),
+		connTimeout: time.Duration(0),
+		packetSize:  defaultPacketSize,
+		version:     getDriverVersion(defaultServerVerion),
+		progName:    defaultServerProgName,
+		encryption:  encryptNotSup,
+		debug:       false,
+	}
+	for _, opt := range opts {
+		if err := opt(server); err != nil {
+			return nil, fmt.Errorf("failed to apply proxy server configuration option: %v", err)
+		}
+	}
+
 	// Ensure packet size falls within the TDS protocol range of 512 to 32767 bytes
 	// NOTE: Encrypted connections have a maximum size of 16383 bytes.  If you request
 	// a higher packet size, the server will respond with an ENVCHANGE request to
 	// alter the packet size to 16383 bytes.
-	if server.PacketSize < 512 {
-		server.PacketSize = 512
-	} else if server.PacketSize > 32767 {
-		server.PacketSize = 32767
+	if server.packetSize < 512 {
+		server.logger.Warn("packet size was set to less than the minimum (512), fixing to 512", zap.Uint16("value_before", server.packetSize))
+		server.packetSize = 512
 	}
-
-	if config.ConnTimeout != nil {
-		server.ConnTimeout = *config.ConnTimeout
-	}
-
-	if config.Logger != nil {
-		server.Logger = config.Logger
-	}
-
-	if config.Version != nil {
-		server.Version = getDriverVersion(*config.Version)
-	} else {
-		server.Version = getDriverVersion(defaultServerVerion)
-	}
-
-	if config.ProgName != nil {
-		server.ProgName = *config.ProgName
-	} else {
-		server.ProgName = defaultServerProgName
-	}
-
-	if config.Encryption != nil {
-		switch *config.Encryption {
-		case "strict":
-			server.Encryption = encryptStrict
-		case "required":
-			server.Encryption = encryptReq
-		case "on":
-			server.Encryption = encryptOn
-		case "off":
-			server.Encryption = encryptOff
-		default:
-			return nil, errors.New("invalid encryption option")
+	if server.packetSize > 32767 {
+		if server.encryption == encryptStrict || server.encryption == encryptReq || server.encryption == encryptOn {
+			server.logger.Warn("packet size was set to more than the maximum for encrypted connections (16383), fixing to 16383", zap.Uint16("value_before", server.packetSize))
+			server.packetSize = 16383
+		} else {
+			server.logger.Warn("packet size was set to more than the maximum (32767), fixing to 32767", zap.Uint16("value_before", server.packetSize))
+			server.packetSize = 32767
 		}
-	} else {
-		server.Encryption = encryptNotSup
 	}
 
 	return server, nil
 }
 
 func (s *Server) ReadLogin(conn net.Conn) (*ServerSession, *login, map[uint8][]byte, error) {
-	toconn := newTimeoutConn(conn, s.ConnTimeout)
-	inbuf := newTdsBuffer(s.PacketSize, toconn)
+	toconn := newTimeoutConn(conn, s.connTimeout)
+	inbuf := newTdsBuffer(s.packetSize, toconn)
 
 	loginOptions, login, err := s.handshake(inbuf)
 	if err != nil {
@@ -121,11 +136,11 @@ func (s *Server) ReadLogin(conn net.Conn) (*ServerSession, *login, map[uint8][]b
 
 	sess := ServerSession{&tdsSession{
 		buf:    inbuf,
-		logger: s.Logger,
+		logger: zapLoggerToContextLogger(s.logger),
 		id:     conn.RemoteAddr().String(),
 
 		// FIXME: REMOVE
-		border0DebugLogs: s.border0DebugLogs,
+		border0DebugLogs: s.debug,
 	}}
 
 	return &sess, &login, loginOptions, nil
@@ -179,8 +194,8 @@ func (s *Server) handshake(r *tdsBuffer) (map[uint8][]byte, login, error) {
 	}
 
 	// FIXME: REMOVE
-	if s.border0DebugLogs {
-		fmt.Printf("Client -> Proxy: revieved prelogin options %+v\n", loginOptions)
+	if s.debug {
+		s.logger.Info("Client -> Proxy: revieved prelogin options", zap.Any("login_opts", loginOptions))
 	}
 
 	err = s.writePrelogin(r)
@@ -194,8 +209,8 @@ func (s *Server) handshake(r *tdsBuffer) (map[uint8][]byte, login, error) {
 	}
 
 	// FIXME: REMOVE
-	if s.border0DebugLogs {
-		fmt.Printf("Client -> Proxy: revieved login packet %+v\n", login)
+	if s.debug {
+		s.logger.Info("Client -> Proxy: revieved login packet ", zap.Any("login_opts", loginOptions))
 	}
 
 	return loginOptions, login, nil
@@ -247,8 +262,8 @@ func (s *Server) writePrelogin(r *tdsBuffer) error {
 	fields := s.preparePreloginResponseFields()
 
 	// FIXME: REMOVE
-	if s.border0DebugLogs {
-		fmt.Printf("Proxy -> Client: returned prelogin response %+v\n", fields)
+	if s.debug {
+		s.logger.Info("Proxy -> Client: returned prelogin response", zap.Any("fields", fields))
 	}
 
 	if err := writePrelogin(packReply, r, fields); err != nil {
@@ -259,11 +274,11 @@ func (s *Server) writePrelogin(r *tdsBuffer) error {
 }
 
 func (s *Server) preparePreloginResponseFields() map[uint8][]byte {
-	s.Version = getDriverVersion("v15.0.4430.0")
+	s.version = getDriverVersion("v15.0.4430.0")
 	fields := map[uint8][]byte{
 		// 4 bytes for version and 2 bytes for minor version
-		preloginVERSION:    {byte(s.Version >> 24), byte(s.Version >> 16), byte(s.Version >> 8), byte(s.Version), 0, 0},
-		preloginENCRYPTION: {s.Encryption},
+		preloginVERSION:    {byte(s.version >> 24), byte(s.version >> 16), byte(s.version >> 8), byte(s.version), 0, 0},
+		preloginENCRYPTION: {s.encryption},
 		preloginINSTOPT:    {0},
 		// preloginTHREADID:   {0, 0, 0, 0},
 		preloginTHREADID: {},
@@ -339,8 +354,8 @@ func (s *Server) readLogin(r *tdsBuffer) (login, error) {
 		return login, fmt.Errorf("failed to read servername: %w", err)
 	}
 	// FIXME: REMOVE
-	if s.border0DebugLogs {
-		fmt.Printf("Get dbname: %s\n", login.Database)
+	if s.debug {
+		s.logger.Info("Database name in login request", zap.String("dbname", login.Database))
 	}
 	login.SSPI, err = readLoginFieldBytes(struct_buf, loginHeader.SSPIOffset, loginHeader.SSPILength)
 	if err != nil {
@@ -367,8 +382,8 @@ func (s *Server) readLogin(r *tdsBuffer) (login, error) {
 		}
 
 		// FIXME: REMOVE
-		if s.border0DebugLogs {
-			fmt.Printf("Proxy-Client: starting FeatureExt parse from offset %d\n", extStart)
+		if s.debug {
+			s.logger.Info("Proxy-Client: starting FeatureExt parse from offset", zap.Int("extStart", extStart))
 		}
 
 		reader := bytes.NewReader(struct_buf[extStart:])
@@ -413,18 +428,20 @@ func (s *Server) readLogin(r *tdsBuffer) (login, error) {
 			case 0x0B:
 				login.FeatureExt.Add(&featureExtAzureSQLDNSCaching{})
 			default:
-				if s.border0DebugLogs {
-					fmt.Printf("Proxy-Client: unknown FeatureExt ID 0x%02X, length %d\n", featureID, featureDataLen)
+				// FIXME: REMOVE
+				if s.debug {
+					s.logger.Error("Proxy-Client: unknown FeatureExt ID", zap.Uint8("featureID", featureID), zap.Uint32("featureDataLen", featureDataLen))
 				}
 				return login, fmt.Errorf("unknown FeatureExt ID 0x%02X", featureID)
 			}
-			if s.border0DebugLogs {
-				fmt.Printf("FeatureExt: ID=0x%02X, Len=%d, Data=% X\n", featureID, featureDataLen, data)
+			// FIXME: REMOVE
+			if s.debug {
+				s.logger.Info("FeatureExt", zap.Uint8("featureID", featureID), zap.Uint32("featureDataLen", featureDataLen), zap.Binary("data", data))
 			}
 		}
 	}
 
-	if s.border0DebugLogs {
+	if s.debug {
 		fmt.Printf("\n--- TDS LOGIN PACKET SUMMARY ---\n")
 		fmt.Printf("TDS Version: 0x%08X\n", login.TDSVersion)
 		fmt.Printf("Client PID: %d\n", login.ClientPID)
@@ -468,14 +485,14 @@ func readLoginFieldBytes(b []byte, offset uint16, length uint16) ([]byte, error)
 
 func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, spid uint16) error {
 	// FIXME: REMOVE
-	if s.border0DebugLogs {
-		fmt.Printf("Proxy-Client: Writing login tokens %+v\n", loginTokens)
+	if s.debug {
+		s.logger.Info("Proxy-Client: Writing login tokens", zap.Any("login_tokens", loginTokens))
 	}
 	loginAck := loginAckStruct{
 		Interface:  1,
 		TDSVersion: verTDS74,
-		ProgName:   s.ProgName,
-		ProgVer:    s.Version,
+		ProgName:   s.progName,
+		ProgVer:    s.version,
 	}
 
 	done := doneStruct{
@@ -495,26 +512,26 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 		case loginAckStruct:
 			if _, err := session.buf.Write(writeLoginAck(t)); err != nil {
 				// FIXME: REMOVE
-				if s.border0DebugLogs {
-					fmt.Printf("Proxy-Client: Error writing loginAck: %v\n", err)
+				if s.debug {
+					s.logger.Info("Proxy-Client: Error writing loginAck", zap.Error(err))
 				}
 				return err
 			}
 			// FIXME: REMOVE
-			if s.border0DebugLogs {
-				fmt.Printf("Proxy-Client: Writing loginAck: %+v\n", loginAck)
+			if s.debug {
+				s.logger.Info("Proxy-Client: Error writing loginAck", zap.Any("loginAck", loginAck))
 			}
 		case doneStruct:
 			if _, err := session.buf.Write(writeDone(done)); err != nil {
 				// FIXME: REMOVE
-				if s.border0DebugLogs {
-					fmt.Printf("Proxy-Client: Error writing doneStruct: %v\n", err)
+				if s.debug {
+					s.logger.Error("Proxy-Client: Error writing doneStruct", zap.Error(err))
 				}
 				return err
 			}
 			// FIXME: REMOVE
-			if s.border0DebugLogs {
-				fmt.Printf("Proxy-Client: Writing doneStruct: %+v\n", done)
+			if s.debug {
+				s.logger.Info("Proxy-Client: Writing doneStruct", zap.Any("done", done))
 			}
 		case envChange:
 			data := make([]byte, 0, len(t.data)+3)
@@ -527,14 +544,14 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 
 			if _, err := session.buf.Write(data); err != nil {
 				// FIXME: REMOVE
-				if s.border0DebugLogs {
-					fmt.Printf("Proxy-Client: Error writing envChange: %v\n", err)
+				if s.debug {
+					s.logger.Info("Proxy-Client: Error writing envChange", zap.Error(err))
 				}
 				return err
 			}
 			// FIXME: REMOVE
-			if s.border0DebugLogs {
-				fmt.Printf("Proxy-Client: Writing envChange: %+v\n", t.data)
+			if s.debug {
+				s.logger.Info("Proxy-Client: Writing envChange", zap.Any("data", data))
 			}
 		case loginToken:
 			data := make([]byte, 0, len(t.data)+3)
@@ -548,26 +565,26 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 
 			if _, err := session.buf.Write(data); err != nil {
 				// FIXME: REMOVE
-				if s.border0DebugLogs {
-					fmt.Printf("Proxy-Client: Error writing loginToken: %v\n", err)
+				if s.debug {
+					s.logger.Info("Proxy-Client: Error writing loginToken", zap.Error(err))
 				}
 				return err
 			}
 			// FIXME: REMOVE
-			if s.border0DebugLogs {
-				fmt.Printf("Proxy-Client: Writing loginToken: %+v\n", t.token)
+			if s.debug {
+				s.logger.Info("Proxy-Client: Writing loginToken", zap.Any("token", t.token))
 			}
 		case featureExtAck:
 			// FIXME: REMOVE
-			if s.border0DebugLogs {
-				fmt.Printf("Proxy-Client: Writing featureExtAck: %+v\n", t)
+			if s.debug {
+				s.logger.Info("Proxy-Client: Writing featureExtAck", zap.Any("token", t))
 			}
 			// Serialize the raw feature ACK data (feature entries + terminator)
 			var rawBuf bytes.Buffer
 			if err := writeFeatureExtAck(&rawBuf, t); err != nil {
 				// FIXME: REMOVE
-				if s.border0DebugLogs {
-					fmt.Printf("Proxy-Client: Error building featureExtAck: %v\n", err)
+				if s.debug {
+					s.logger.Error("Proxy-Client: Error building featureExtAck", zap.Error(err))
 				}
 				return err
 			}
@@ -587,19 +604,16 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 				return err
 			}
 			// FIXME: REMOVE
-			if s.border0DebugLogs {
-				fmt.Printf("Proxy-Client: featureExtAck raw bytes written (%d bytes)\n", len(raw))
+			if s.debug {
+				s.logger.Error("Proxy-Client: featureExtAck raw bytes written", zap.Int("len", len(raw)))
 			}
 		default:
-			// FIXME: REMOVE
-			if s.border0DebugLogs {
-				fmt.Printf("Proxy-Client: Unknown token type: %T\n", t)
-			}
+			fmt.Printf("Proxy-Client: Unknown token type: %T\n", t)
 		}
 	}
 
 	// FIXME: REMOVE
-	if s.border0DebugLogs {
+	if s.debug {
 		fmt.Printf("Proxy-Client: Writing loginTokens %+v\n", loginTokens)
 		fmt.Printf("Proxy-Client: Writing loginAck %+v\n", loginAck)
 		fmt.Printf("Proxy-Client: Writing doneStruct %+v\n", done)
@@ -748,7 +762,7 @@ func (s *tdsSession) ParseTransMgrReq() ([]headerStruct, uint16, isoLevel, strin
 // 	}
 // }
 
-func (s *tdsSession) ParseRPC() ([]headerStruct, procId, uint16, []param, []interface{}, error) {
+func (s *tdsSession) ParseRPC(logger *zap.Logger) ([]headerStruct, procId, uint16, []param, []any, error) {
 	headers, err := readAllHeaders(s.buf)
 	if err != nil {
 		return nil, procId{}, 0, nil, nil, err
@@ -777,7 +791,7 @@ func (s *tdsSession) ParseRPC() ([]headerStruct, procId, uint16, []param, []inte
 		return nil, procId{}, 0, nil, nil, err
 	}
 
-	params, values, err := parseParams(s.buf, s.encoding)
+	params, values, err := parseParams(logger, s.buf, s.encoding)
 	if err != nil {
 		return nil, procId{}, 0, nil, nil, err
 	}
@@ -785,10 +799,15 @@ func (s *tdsSession) ParseRPC() ([]headerStruct, procId, uint16, []param, []inte
 	return headers, proc, flags, params, values, nil
 }
 
-func parseParams(b *tdsBuffer, encoding msdsn.EncodeParameters) ([]param, []interface{}, error) {
+func parseParams(logger *zap.Logger, b *tdsBuffer, encoding msdsn.EncodeParameters) ([]param, []any, error) {
 	var (
 		params []param
-		values []interface{}
+		values []any
+	)
+
+	const (
+		TDS_RPC_OUTPUT = 0x1
+		TDS_RPC_NODEF  = 0x2
 	)
 
 	for {
@@ -821,7 +840,7 @@ func parseParams(b *tdsBuffer, encoding msdsn.EncodeParameters) ([]param, []inte
 		p.ti = readParamTypeInfo(b, b.byte(), nil, encoding)
 
 		// // OUTPUT-only: skip without consuming data
-		// if p.Flags&paramOutput != 0 {
+		// if p.Flags&TDS_RPC_OUTPUT != 0 {
 		// 	fmt.Printf("parseParams: param %q is OUTPUT-only\n", p.Name)
 		// 	params = append(params, p)
 		// 	values = append(values, nil)
@@ -836,6 +855,7 @@ func parseParams(b *tdsBuffer, encoding msdsn.EncodeParameters) ([]param, []inte
 		// 	values = append(values, nil)
 		// 	continue
 		// }
+
 		// normal IN parameter → read value
 		val := p.ti.Reader(&p.ti, b, nil)
 		p.buffer = p.ti.Buffer
@@ -970,7 +990,7 @@ func NewConnectorFromConfig(config msdsn.Config) *Connector {
 	return newConnector(config, driverInstanceNoProcess)
 }
 
-func NewClient(ctx context.Context, c *Connector, dialer Dialer, database string) (*Client, error) {
+func NewClient(ctx context.Context, logger *zap.Logger, c *Connector, dialer Dialer, database string) (*Client, error) {
 	border0DebugLogs := strings.ToLower(os.Getenv("BORDER0_MSSQL_PROXY_DEBUG")) == "true"
 
 	if dialer != nil {
@@ -993,17 +1013,22 @@ func NewClient(ctx context.Context, c *Connector, dialer Dialer, database string
 	}
 
 	return &Client{
-		Conn:             conn,
-		border0DebugLogs: border0DebugLogs,
+		conn:   conn,
+		logger: logger,
+		debug:  border0DebugLogs,
 	}, nil
 }
 
+func (c *Client) ConnSpid() uint16 {
+	return c.conn.sess.buf.rSpid
+}
+
 func (c *Client) Close() error {
-	return c.Conn.Close()
+	return c.conn.Close()
 }
 
 func (c *Client) SendSqlBatch(ctx context.Context, serverConn *ServerSession, query string, headers []headerStruct, resetSession bool) ([]doneStruct, error) {
-	if err := sendSqlBatch72(c.Conn.sess.buf, query, headers, resetSession); err != nil {
+	if err := sendSqlBatch72(c.conn.sess.buf, query, headers, resetSession); err != nil {
 		return nil, err
 	}
 
@@ -1011,25 +1036,24 @@ func (c *Client) SendSqlBatch(ctx context.Context, serverConn *ServerSession, qu
 }
 
 func (c *Client) SendRpc(ctx context.Context, serverConn *ServerSession, headers []headerStruct, proc procId, flags uint16, params []param, resetSession bool) ([]doneStruct, error) {
-	if err := sendRpc(c.Conn.sess.buf, headers, proc, flags, params, resetSession, c.Conn.sess.encoding); err != nil {
+	if err := sendRpc(c.conn.sess.buf, headers, proc, flags, params, resetSession, c.conn.sess.encoding); err != nil {
 		return nil, err
 	}
-
 	return c.processResponse(ctx, serverConn)
 }
 
 func (c *Client) TransMgrReq(ctx context.Context, serverConn *ServerSession, headers []headerStruct, rqtype uint16, isolationLevel isoLevel, name, newname string, flags uint8, resetSession bool) ([]doneStruct, error) {
 	switch rqtype {
 	case tmBeginXact:
-		if err := sendBeginXact(c.Conn.sess.buf, headers, isolationLevel, name, resetSession); err != nil {
+		if err := sendBeginXact(c.conn.sess.buf, headers, isolationLevel, name, resetSession); err != nil {
 			return nil, err
 		}
 	case tmCommitXact:
-		if err := sendCommitXact(c.Conn.sess.buf, headers, name, flags, uint8(isolationLevel), newname, resetSession); err != nil {
+		if err := sendCommitXact(c.conn.sess.buf, headers, name, flags, uint8(isolationLevel), newname, resetSession); err != nil {
 			return nil, err
 		}
 	case tmRollbackXact:
-		if err := sendRollbackXact(c.Conn.sess.buf, headers, name, flags, uint8(isolationLevel), newname, resetSession); err != nil {
+		if err := sendRollbackXact(c.conn.sess.buf, headers, name, flags, uint8(isolationLevel), newname, resetSession); err != nil {
 			return nil, err
 		}
 	default:
@@ -1039,10 +1063,13 @@ func (c *Client) TransMgrReq(ctx context.Context, serverConn *ServerSession, hea
 	return c.processResponse(ctx, serverConn)
 }
 
-func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]doneStruct, error) {
-	c.Conn.sess.buf.serverConn = sess.tdsSession
+func (c *Client) processResponse(
+	ctx context.Context,
+	sess *ServerSession,
+) ([]doneStruct, error) {
+	c.conn.sess.buf.serverConn = sess.tdsSession
 
-	packet_type, err := c.Conn.sess.buf.BeginRead()
+	packet_type, err := c.conn.sess.buf.BeginRead()
 	if err != nil {
 		switch e := err.(type) {
 		case *net.OpError:
@@ -1062,17 +1089,17 @@ func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]do
 	var columns []columnStruct
 	var errs []Error
 	for {
-		token := token(c.Conn.sess.buf.byte())
-		if c.border0DebugLogs {
-			fmt.Printf("processResponse: %s token %d\n", c.Conn.sess.id, token)
+		token := token(c.conn.sess.buf.byte())
+		if c.debug {
+			fmt.Printf("processResponse: %s token %d\n", c.conn.sess.id, token)
 		}
 		switch token {
 		case tokenReturnStatus:
-			parseReturnStatus(c.Conn.sess.buf)
+			parseReturnStatus(c.conn.sess.buf)
 		case tokenOrder:
-			parseOrder(c.Conn.sess.buf)
+			parseOrder(c.conn.sess.buf)
 		case tokenDone, tokenDoneProc, tokenDoneInProc:
-			res := parseDone(c.Conn.sess.buf)
+			res := parseDone(c.conn.sess.buf)
 			res.errors = errs
 			dones = append(dones, res)
 			if res.Status&doneSrvError != 0 {
@@ -1083,10 +1110,10 @@ func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]do
 				return dones, nil
 			}
 		case tokenColMetadata:
-			columns = parseColMetadata72(c.Conn.sess.buf, c.Conn.sess)
+			columns = parseColMetadata72(c.conn.sess.buf, c.conn.sess)
 		case tokenRow:
 			row := make([]interface{}, len(columns))
-			err = parseRow(ctx, c.Conn.sess.buf, c.Conn.sess, columns, row)
+			err = parseRow(ctx, c.conn.sess.buf, c.conn.sess, columns, row)
 			if err != nil {
 				return nil, StreamError{
 					InnerError: fmt.Errorf("failed to parse row: %w", err),
@@ -1094,25 +1121,25 @@ func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]do
 			}
 		case tokenNbcRow:
 			row := make([]interface{}, len(columns))
-			err = parseNbcRow(ctx, c.Conn.sess.buf, c.Conn.sess, columns, row)
+			err = parseNbcRow(ctx, c.conn.sess.buf, c.conn.sess, columns, row)
 			if err != nil {
 				return nil, StreamError{
 					InnerError: fmt.Errorf("failed to parse row: %w", err),
 				}
 			}
 		case tokenEnvChange:
-			processEnvChg(ctx, c.Conn.sess)
+			processEnvChg(ctx, c.conn.sess)
 		case tokenError:
-			err := parseError72(c.Conn.sess.buf)
+			err := parseError72(c.conn.sess.buf)
 			errs = append(errs, err)
 		case tokenInfo:
-			parseInfo(c.Conn.sess.buf)
+			parseInfo(c.conn.sess.buf)
 		case tokenReturnValue:
-			parseReturnValue(c.Conn.sess.buf, c.Conn.sess)
+			parseReturnValue(c.conn.sess.buf, c.conn.sess)
 		case tokenSessionState:
 			// Read the total length of the SESSIONSTATE token (excluding TokenType and this Length field itself)
 			var totalLen uint32
-			if err := binary.Read(c.Conn.sess.buf, binary.LittleEndian, &totalLen); err != nil {
+			if err := binary.Read(c.conn.sess.buf, binary.LittleEndian, &totalLen); err != nil {
 				return nil, StreamError{
 					InnerError: fmt.Errorf("failed to read SESSIONSTATE length: %w", err),
 				}
@@ -1120,14 +1147,14 @@ func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]do
 
 			// Read SeqNo (4 bytes)
 			var seqNo uint32
-			if err := binary.Read(c.Conn.sess.buf, binary.LittleEndian, &seqNo); err != nil {
+			if err := binary.Read(c.conn.sess.buf, binary.LittleEndian, &seqNo); err != nil {
 				return nil, StreamError{
 					InnerError: fmt.Errorf("failed to read SESSIONSTATE SeqNo: %w", err),
 				}
 			}
 
 			// Read Status (1 byte)
-			status, err := c.Conn.sess.buf.ReadByte()
+			status, err := c.conn.sess.buf.ReadByte()
 			if err != nil {
 				return nil, StreamError{
 					InnerError: fmt.Errorf("failed to read SESSIONSTATE Status: %w", err),
@@ -1136,20 +1163,20 @@ func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]do
 			fRecoverable := status&0x01 == 0x01
 
 			// FIXME: REMOVE
-			if c.border0DebugLogs {
+			if c.debug {
 				fmt.Printf("processResponse: SESSIONSTATE received - TotalLen=%d, SeqNo=%d, fRecoverable=%v\n", totalLen, seqNo, fRecoverable)
 			}
 
 			bytesLeft := int(totalLen - 5) // minus SeqNo (4) + Status (1)
 			for bytesLeft > 0 {
-				stateID, err := c.Conn.sess.buf.ReadByte()
+				stateID, err := c.conn.sess.buf.ReadByte()
 				if err != nil {
 					return nil, StreamError{
 						InnerError: fmt.Errorf("failed to read StateId: %w", err),
 					}
 				}
 
-				lenByte, err := c.Conn.sess.buf.ReadByte()
+				lenByte, err := c.conn.sess.buf.ReadByte()
 				if err != nil {
 					return nil, StreamError{
 						InnerError: fmt.Errorf("failed to read StateLen byte: %w", err),
@@ -1160,7 +1187,7 @@ func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]do
 				var stateLen int
 				if lenByte == 0xFF {
 					var longLen uint32
-					if err := binary.Read(c.Conn.sess.buf, binary.LittleEndian, &longLen); err != nil {
+					if err := binary.Read(c.conn.sess.buf, binary.LittleEndian, &longLen); err != nil {
 						return nil, StreamError{
 							InnerError: fmt.Errorf("failed to read extended StateLen: %w", err),
 						}
@@ -1173,17 +1200,18 @@ func (c *Client) processResponse(ctx context.Context, sess *ServerSession) ([]do
 				bytesLeft -= stateLen
 
 				stateValue := make([]byte, stateLen)
-				if _, err := io.ReadFull(c.Conn.sess.buf, stateValue); err != nil {
+				if _, err := io.ReadFull(c.conn.sess.buf, stateValue); err != nil {
 					return nil, StreamError{
 						InnerError: fmt.Errorf("failed to read StateValue: %w", err),
 					}
 				}
 
-				if c.border0DebugLogs {
+				if c.debug {
 					fmt.Printf("SESSIONSTATE: StateID=0x%02X, Length=%d, Value=% X\n", stateID, stateLen, stateValue)
 				}
 			}
 		default:
+			c.logger.Error("unknown token type", zap.Error(fmt.Errorf("unknown token type returned: %v", token)))
 			return nil, StreamError{
 				InnerError: fmt.Errorf("unknown token type returned: %v", token),
 			}
@@ -1207,15 +1235,15 @@ func (d doneStruct) GetError() error {
 }
 
 func (c *Client) LoginTokens() []tokenStruct {
-	return c.Conn.sess.loginTokens
+	return c.conn.sess.loginTokens
 }
 
 func (c *Client) Database() string {
-	return c.Conn.sess.database
+	return c.conn.sess.database
 }
 
 func (c *Client) SendAttention(ctx context.Context, serverConn *ServerSession) ([]doneStruct, error) {
-	if err := sendAttention(c.Conn.sess.buf); err != nil {
+	if err := sendAttention(c.conn.sess.buf); err != nil {
 		return nil, err
 	}
 
