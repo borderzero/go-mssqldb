@@ -38,7 +38,9 @@ type Server struct {
 }
 
 type ServerSession struct {
-	*tdsSession
+	logger     *zap.Logger
+	tdsSession *tdsSession
+	debug      bool
 }
 
 type ProxyServerOption func(*Server) error
@@ -134,53 +136,76 @@ func (s *Server) ReadLogin(conn net.Conn) (*ServerSession, *login, map[uint8][]b
 		return nil, nil, loginOptions, err
 	}
 
-	sess := ServerSession{&tdsSession{
-		buf:    inbuf,
-		logger: zapLoggerToContextLogger(s.logger),
-		id:     conn.RemoteAddr().String(),
-
-		// FIXME: REMOVE
-		border0DebugLogs: s.debug,
-	}}
+	sess := ServerSession{
+		logger: s.logger,
+		tdsSession: &tdsSession{
+			buf:    inbuf,
+			logger: zapLoggerToContextLogger(s.logger),
+			id:     conn.RemoteAddr().String(),
+		},
+	}
 
 	return &sess, &login, loginOptions, nil
 }
 
-func (s *tdsSession) ReadCommand() (packetType, error) {
+func (s *ServerSession) ReadCommand() (packetType, error) {
 	var buf []byte
 
-	// FIXME: REMOVE
-	if s.border0DebugLogs {
-		fmt.Printf("Start ReadCommand: %s rpos=%d, rsize=%d\n", s.id, s.buf.rpos, s.buf.rsize)
+	// FIXME: remove
+	if s.debug {
+		s.logger.Debug(
+			"Start ReadCommand",
+			zap.String("tdsSession.id", s.tdsSession.id),
+			zap.Int("tdsSession.buf.rpos", s.tdsSession.buf.rpos),
+			zap.Int("tdsSession.buf.rsize", s.tdsSession.buf.rsize),
+		)
 	}
+
 	for {
 		// FIXME: REMOVE
-		if s.border0DebugLogs {
-			fmt.Printf("ReadCommand: %s rpos=%d, rsize=%d\n", s.id, s.buf.rpos, s.buf.rsize)
+		if s.debug {
+			s.logger.Debug(
+				"ReadCommand",
+				zap.String("tdsSession.id", s.tdsSession.id),
+				zap.Int("tdsSession.buf.rpos", s.tdsSession.buf.rpos),
+				zap.Int("tdsSession.buf.rsize", s.tdsSession.buf.rsize),
+			)
 		}
-		_, err := s.buf.BeginRead(withFallbackID(s.id))
+
+		rPacketType, err := s.tdsSession.buf.BeginRead()
 		if err != nil {
 			// FIXME: REMOVE
-			if s.border0DebugLogs {
-				fmt.Printf("ReadCommand: %s error %v\n", s.id, err)
+			if s.debug {
+				s.logger.Debug(
+					"ReadCommand error",
+					zap.String("tdsSession.id", s.tdsSession.id),
+					zap.Error(err),
+				)
 			}
 			return 0, err
 		}
 
 		// FIXME: REMOVE
-		if s.border0DebugLogs {
-			fmt.Printf("Got data: %s %d\n", s.id, s.buf.rsize)
+		if s.debug {
+			s.logger.Debug(
+				"ReadCommand got data",
+				zap.Uint8("rPacketType", uint8(rPacketType)),
+				zap.String("tdsSession.id", s.tdsSession.id),
+				zap.Int("tdsSession.buf.rpos", s.tdsSession.buf.rpos),
+				zap.Int("tdsSession.buf.rsize", s.tdsSession.buf.rsize),
+			)
 		}
 
-		bytes := make([]byte, s.buf.rsize-s.buf.rpos)
-		s.buf.ReadFull(bytes)
+		bytes := make([]byte, s.tdsSession.buf.rsize-s.tdsSession.buf.rpos)
+		s.tdsSession.buf.ReadFull(bytes)
+		s.tdsSession.buf.rPacketType = rPacketType
 		buf = append(buf, bytes...)
 
-		if s.buf.final {
-			copy(s.buf.rbuf, buf)
-			s.buf.rsize = len(buf)
-			s.buf.rpos = 0
-			return s.buf.rPacketType, nil
+		if s.tdsSession.buf.final {
+			copy(s.tdsSession.buf.rbuf, buf)
+			s.tdsSession.buf.rsize = len(buf)
+			s.tdsSession.buf.rpos = 0
+			return s.tdsSession.buf.rPacketType, nil
 		}
 	}
 }
@@ -502,15 +527,15 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 		errors:   []Error{},
 	}
 
-	session.buf.wSpid = spid
-	session.buf.BeginPacket(packReply, false)
-	// session.buf.Write(loginEnvBytes)
-	// session.buf.Write(writeLoginAck(loginAckStruct))
-	// session.buf.Write(writeDone(doneStruct))
+	session.tdsSession.buf.wSpid = spid
+	session.tdsSession.buf.BeginPacket(packReply, false)
+	// session.tdsSession.buf.Write(loginEnvBytes)
+	// session.tdsSession.buf.Write(writeLoginAck(loginAckStruct))
+	// session.tdsSession.buf.Write(writeDone(doneStruct))
 	for _, token := range loginTokens {
 		switch t := token.(type) {
 		case loginAckStruct:
-			if _, err := session.buf.Write(writeLoginAck(t)); err != nil {
+			if _, err := session.tdsSession.buf.Write(writeLoginAck(t)); err != nil {
 				// FIXME: REMOVE
 				if s.debug {
 					s.logger.Info("Proxy-Client: Error writing loginAck", zap.Error(err))
@@ -522,7 +547,7 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 				s.logger.Info("Proxy-Client: Error writing loginAck", zap.Any("loginAck", loginAck))
 			}
 		case doneStruct:
-			if _, err := session.buf.Write(writeDone(done)); err != nil {
+			if _, err := session.tdsSession.buf.Write(writeDone(done)); err != nil {
 				// FIXME: REMOVE
 				if s.debug {
 					s.logger.Error("Proxy-Client: Error writing doneStruct", zap.Error(err))
@@ -542,7 +567,7 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 			data = append(data, lenBytes...)
 			data = append(data, t.data...)
 
-			if _, err := session.buf.Write(data); err != nil {
+			if _, err := session.tdsSession.buf.Write(data); err != nil {
 				// FIXME: REMOVE
 				if s.debug {
 					s.logger.Info("Proxy-Client: Error writing envChange", zap.Error(err))
@@ -563,7 +588,7 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 
 			data = append(data, t.data...)
 
-			if _, err := session.buf.Write(data); err != nil {
+			if _, err := session.tdsSession.buf.Write(data); err != nil {
 				// FIXME: REMOVE
 				if s.debug {
 					s.logger.Info("Proxy-Client: Error writing loginToken", zap.Error(err))
@@ -590,7 +615,7 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 			}
 			raw := rawBuf.Bytes()
 			// Write token type
-			if err := session.buf.WriteByte(byte(tokenFeatureExtAck)); err != nil {
+			if err := session.tdsSession.buf.WriteByte(byte(tokenFeatureExtAck)); err != nil {
 				return err
 			}
 			// Write length of feature data (uint32 little-endian)
@@ -600,7 +625,7 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 			// 	return err
 			// }
 			// Write the feature data itself
-			if _, err := session.buf.Write(raw); err != nil {
+			if _, err := session.tdsSession.buf.Write(raw); err != nil {
 				return err
 			}
 			// FIXME: REMOVE
@@ -619,11 +644,7 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 		fmt.Printf("Proxy-Client: Writing doneStruct %+v\n", done)
 	}
 
-	return session.buf.FinishPacket()
-}
-
-func UCS2String(s []byte) (string, error) {
-	return ucs22str(s)
+	return session.tdsSession.buf.FinishPacket()
 }
 
 func (c *Conn) Transport() io.ReadWriteCloser {
@@ -646,76 +667,91 @@ func (c *Conn) Session() *tdsSession {
 	return c.sess
 }
 
-func (s *tdsSession) ParseHeader() (header, error) {
+func (s *ServerSession) ParseHeader() (header, error) {
 	var h header
-	err := binary.Read(s.buf, binary.LittleEndian, &h)
+	err := binary.Read(s.tdsSession.buf, binary.LittleEndian, &h)
 	if err != nil {
 		return header{}, err
 	}
-
 	return h, nil
 }
 
-func (s *tdsSession) ParseSQLBatch() ([]headerStruct, string, error) {
-	// fmt.Printf("ParseSQLBatch: %s payload total=%d, about to consume body at rpos=%d\n", s.id, s.buf.rsize, s.buf.rpos)
-	headers, err := readAllHeaders(s.buf)
+func (s *ServerSession) ParseSQLBatch() ([]headerStruct, string, error) {
+	// FIXME: REMOVE
+	if s.debug {
+		s.logger.Debug("ParseSQLBatch",
+			zap.String("tdsSession.id", s.tdsSession.id),
+			zap.Int("tdsSession.buf.rsize", s.tdsSession.buf.rsize),
+			zap.Int("tdsSession.buf.rpos", s.tdsSession.buf.rpos),
+		)
+	}
+
+	headers, err := readAllHeaders(s.tdsSession.buf)
 	if err != nil {
 		return nil, "", err
 	}
 
-	// fmt.Printf("ParseSQLBatch: headers=%+v\n", headers)
-	query, err := readUcs2(s.buf, (s.buf.rsize-s.buf.rpos)/2)
+	// FIXME: REMOVE
+	if s.debug {
+		s.logger.Debug("ParseSQLBatch headers", zap.Any("headers", headers))
+	}
+
+	query, err := readUcs2(s.tdsSession.buf, (s.tdsSession.buf.rsize-s.tdsSession.buf.rpos)/2)
 	if err != nil {
 		return nil, "", err
 	}
-	// fmt.Printf("ParseSQLBatch: query=%s\n", query)
+
+	// FIXME: REMOVE
+	if s.debug {
+		s.logger.Debug("ParseSQLBatch query", zap.String("query", query))
+	}
 
 	return headers, query, nil
 }
 
-func (s *tdsSession) ParseTransMgrReq() ([]headerStruct, uint16, isoLevel, string, string, uint8, error) {
-	headers, err := readAllHeaders(s.buf)
+func (s *ServerSession) ParseTransMgrReq() ([]headerStruct, uint16, isoLevel, string, string, uint8, error) {
+	headers, err := readAllHeaders(s.tdsSession.buf)
 	if err != nil {
 		return nil, 0, 0, "", "", 0, err
 	}
 
 	var rqtype uint16
-	if err := binary.Read(s.buf, binary.LittleEndian, &rqtype); err != nil {
+	if err := binary.Read(s.tdsSession.buf, binary.LittleEndian, &rqtype); err != nil {
 		return nil, 0, 0, "", "", 0, err
 	}
 
 	switch rqtype {
 	case tmBeginXact:
 		var isolationLevel isoLevel
-		if err := binary.Read(s.buf, binary.LittleEndian, &isolationLevel); err != nil {
+		if err := binary.Read(s.tdsSession.buf, binary.LittleEndian, &isolationLevel); err != nil {
 			return nil, 0, 0, "", "", 0, err
 		}
 
-		name, err := readBVarChar(s.buf)
+		name, err := readBVarChar(s.tdsSession.buf)
 		if err != nil {
 			return nil, 0, 0, "", "", 0, err
 		}
 
 		return headers, rqtype, isolationLevel, name, "", 0, nil
 	case tmCommitXact, tmRollbackXact:
-		name, err := readBVarChar(s.buf)
+		name, err := readBVarChar(s.tdsSession.buf)
 		if err != nil {
 			return nil, 0, 0, "", "", 0, err
 		}
 
 		var flags uint8
-		if err := binary.Read(s.buf, binary.LittleEndian, &flags); err != nil {
+		if err := binary.Read(s.tdsSession.buf, binary.LittleEndian, &flags); err != nil {
 			return nil, 0, 0, "", "", 0, err
 		}
 
 		var newname string
 		if flags&fBeginXact != 0 {
 			var isolationLevel isoLevel
-			if err := binary.Read(s.buf, binary.LittleEndian, &isolationLevel); err != nil {
+			if err := binary.Read(s.tdsSession.buf, binary.LittleEndian, &isolationLevel); err != nil {
 				return nil, 0, 0, "", "", 0, err
 			}
 
-			newname, err = readBVarChar(s.buf)
+			newname, err = readBVarChar(s.tdsSession.buf)
 			if err != nil {
 				return nil, 0, 0, "", "", 0, err
 			}
@@ -762,40 +798,59 @@ func (s *tdsSession) ParseTransMgrReq() ([]headerStruct, uint16, isoLevel, strin
 // 	}
 // }
 
-func (s *tdsSession) ParseRPC(logger *zap.Logger) ([]headerStruct, procId, uint16, []param, []any, error) {
-	headers, err := readAllHeaders(s.buf)
+func (s *ServerSession) ParseRPC(logger *zap.Logger) ([]headerStruct, procId, uint16, []param, []any, error) {
+	headers, err := readAllHeaders(s.tdsSession.buf)
 	if err != nil {
 		return nil, procId{}, 0, nil, nil, err
 	}
-	// fmt.Printf("ParseRPC: %s payload total=%d, about to consume body at rpos=%d\n", s.id, s.buf.rsize, s.buf.rpos)
+
+	if s.debug {
+		s.logger.Debug(
+			"Start ParseRPC",
+			zap.String("tdsSession.id", s.tdsSession.id),
+			zap.Int("tdsSession.buf.rpos", s.tdsSession.buf.rpos),
+			zap.Int("tdsSession.buf.rsize", s.tdsSession.buf.rsize),
+		)
+	}
+
 	var nameLength uint16
-	if err := binary.Read(s.buf, binary.LittleEndian, &nameLength); err != nil {
+	if err := binary.Read(s.tdsSession.buf, binary.LittleEndian, &nameLength); err != nil {
 		return nil, procId{}, 0, nil, nil, err
 	}
 
 	var proc procId
 	var idswitch uint16 = 0xffff
 	if nameLength == idswitch {
-		if err := binary.Read(s.buf, binary.LittleEndian, &proc.id); err != nil {
+		if err := binary.Read(s.tdsSession.buf, binary.LittleEndian, &proc.id); err != nil {
 			return nil, procId{}, 0, nil, nil, err
 		}
 	} else {
-		proc.name, err = readUcs2(s.buf, int(nameLength))
+		proc.name, err = readUcs2(s.tdsSession.buf, int(nameLength))
 		if err != nil {
 			return nil, procId{}, 0, nil, nil, err
 		}
 	}
 
 	var flags uint16
-	if err := binary.Read(s.buf, binary.LittleEndian, &flags); err != nil {
+	if err := binary.Read(s.tdsSession.buf, binary.LittleEndian, &flags); err != nil {
 		return nil, procId{}, 0, nil, nil, err
 	}
 
-	params, values, err := parseParams(logger, s.buf, s.encoding)
+	params, values, err := parseParams(logger, s.tdsSession.buf, s.tdsSession.encoding)
 	if err != nil {
 		return nil, procId{}, 0, nil, nil, err
 	}
-	// fmt.Printf("ParseRPC: %s params done, rpos=%d, rsize=%d, final=%v\n", s.id, s.buf.rpos, s.buf.rsize, s.buf.final)
+
+	if s.debug {
+		s.logger.Debug(
+			"ParseRPC params parsed",
+			zap.String("tdsSession.id", s.tdsSession.id),
+			zap.Int("tdsSession.buf.rpos", s.tdsSession.buf.rpos),
+			zap.Int("tdsSession.buf.rsize", s.tdsSession.buf.rsize),
+			zap.Bool("tdsSession.buf.final", s.tdsSession.buf.final),
+		)
+	}
+
 	return headers, proc, flags, params, values, nil
 }
 
