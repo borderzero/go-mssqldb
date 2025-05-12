@@ -1179,16 +1179,8 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 	var loginTokens []tokenStruct
 	errs := make([]Error, 0, 5)
 	for tokens := 0; ; tokens += 1 {
-		// FIXME: REMOVE
-		if sess.border0DebugLogs {
-			fmt.Println("reading next token")
-		}
 		token := token(sess.buf.byte())
 		sess.LogF(ctx, msdsn.LogDebug, "got token %v", token)
-		// FIXME: REMOVE
-		if sess.border0DebugLogs {
-			fmt.Println("got token", token)
-		}
 		switch token {
 		case tokenSSPI:
 			ch <- parseSSPIMsg(sess.buf)
@@ -1316,15 +1308,7 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 				_ = sqlexp.ReturnMessageEnqueue(ctx, outs.msgq, sqlexp.MsgError{Error: err})
 			}
 		case tokenInfo:
-			// FIXME: REMOVE
-			if sess.border0DebugLogs {
-				fmt.Printf("got INFO\n")
-			}
 			length := sess.buf.uint16()
-			// FIXME: REMOVE
-			if sess.border0DebugLogs {
-				fmt.Printf("got INFO length %d\n", length)
-			}
 			infoBytes := make([]byte, length)
 			_, err := sess.buf.Read(infoBytes)
 			tokenInfo := loginToken{
@@ -1332,10 +1316,6 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 				data:  infoBytes,
 			}
 			if err != nil {
-				// FIXME: REMOVE
-				if sess.border0DebugLogs {
-					fmt.Printf("got INFO read error %v\n", err)
-				}
 				badStreamPanic(err)
 			}
 
@@ -1344,10 +1324,6 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 			// // create a reader for the info bytes
 			// r := bytes.NewReader(infoBytes)
 			// tokenInfo := parseInfo(sess.buf)
-			// FIXME: REMOVE
-			if sess.border0DebugLogs {
-				fmt.Printf("got INFO token %v\n", tokenInfo)
-			}
 			loginTokens = append(loginTokens, tokenInfo)
 			// sess.loginEnvBytes = append(sess.loginEnvBytes, []byte{byte(tokenInfo), byte(length & 0xFF), byte(length >> 8)}...)
 			// sess.loginEnvBytes = append(sess.loginEnvBytes, infoBytes...)
@@ -1358,10 +1334,6 @@ func processSingleResponse(ctx context.Context, sess *tdsSession, ch chan tokenS
 				if ov, has := outs.params[name]; has {
 					err = scanIntoOut(name, nv.Value, ov)
 					if err != nil {
-						// FIXME: REMOVE
-						if sess.border0DebugLogs {
-							fmt.Println("scan error", err)
-						}
 						ch <- err
 					}
 				}

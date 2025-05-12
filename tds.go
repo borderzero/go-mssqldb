@@ -177,8 +177,6 @@ type tdsSession struct {
 	encoding        msdsn.EncodeParameters
 	loginTokens     []tokenStruct
 	id              string
-
-	border0DebugLogs bool
 }
 
 type alwaysEncryptedSettings struct {

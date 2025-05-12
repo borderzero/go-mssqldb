@@ -214,34 +214,9 @@ func (r *tdsBuffer) readNextPacket() error {
 	return nil
 }
 
-type beginReadConfig struct {
-	id string
-}
-
-type beginRedOption func(beginReadConfig)
-
-func withFallbackID(id string) beginRedOption { return func(brc beginReadConfig) { brc.id = id } }
-
-func (r *tdsBuffer) BeginRead(opts ...beginRedOption) (packetType, error) {
-	conf := beginReadConfig{
-		id: "UNSET",
-	}
-	for _, opt := range opts {
-		opt(conf)
-	}
-
-	// var a string
-	if r.serverConn != nil {
-		conf.id = r.serverConn.id
-		// fmt.Printf("BeginRead with serverconn: %s %d\n", r.serverConn.id, r.rPacketType)
-		r.serverConn.buf.BeginPacket(r.rPacketType, false)
-	} else {
-		// fmt.Printf("BeginRead no serverconn: %s %d\n", conf.id, r.rPacketType)
-	}
-
+func (r *tdsBuffer) BeginRead() (packetType, error) {
 	err := r.readNextPacket()
 	if err != nil {
-		// fmt.Printf("BeginRead error: %s: %s\n", conf.id, err)
 		return 0, err
 	}
 	return r.rPacketType, nil
