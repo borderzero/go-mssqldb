@@ -156,6 +156,7 @@ const (
 	featExtAZURESQLSUPPORT    byte = 0x08
 	featExtDATACLASSIFICATION byte = 0x09
 	featExtUTF8SUPPORT        byte = 0x0A
+	featExtAZURESQLDNSCACHING byte = 0x0B
 	featExtTERMINATOR         byte = 0xFF
 )
 
@@ -563,7 +564,7 @@ func (f *featureExtUTF8Support) toBytes() []byte { return nil } // Can be []byte
 // AZURESQLDNSCACHING feature extension
 type featureExtAzureSQLDNSCaching struct{}
 
-func (f *featureExtAzureSQLDNSCaching) featureID() byte { return 0x0B }
+func (f *featureExtAzureSQLDNSCaching) featureID() byte { return featExtAZURESQLDNSCACHING }
 func (f *featureExtAzureSQLDNSCaching) toBytes() []byte { return nil }
 
 type loginHeader struct {
@@ -1095,12 +1096,24 @@ func prepareLogin(ctx context.Context, c *Connector, p msdsn.Config, logger Cont
 		ChangePassword: p.ChangePassword,
 		ClientPID:      uint32(os.Getpid()),
 	}
-	l.FeatureExt.Add(&featureExtSessionRecovery{})
-	l.FeatureExt.Add(&featureExtColumnEncryption{version: 0x03})
-	l.FeatureExt.Add(&featureExtGlobalTransactions{})
-	l.FeatureExt.Add(&featureExtDataClassification{version: 0x02})
-	l.FeatureExt.Add(&featureExtUTF8Support{})
-	l.FeatureExt.Add(&featureExtAzureSQLDNSCaching{})
+	if featAddErr := l.FeatureExt.Add(&featureExtSessionRecovery{}); featAddErr != nil {
+		logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("failed to set featureExtSessionRecovery: %v", featAddErr))
+	}
+	if featAddErr := l.FeatureExt.Add(&featureExtColumnEncryption{version: 0x03}); featAddErr != nil {
+		logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("failed to set featureExtColumnEncryption: %v", featAddErr))
+	}
+	if featAddErr := l.FeatureExt.Add(&featureExtGlobalTransactions{}); featAddErr != nil {
+		logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("failed to set featureExtGlobalTransactions: %v", featAddErr))
+	}
+	if featAddErr := l.FeatureExt.Add(&featureExtDataClassification{version: 0x02}); featAddErr != nil {
+		logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("failed to set featureExtDataClassification: %v", featAddErr))
+	}
+	if featAddErr := l.FeatureExt.Add(&featureExtUTF8Support{}); featAddErr != nil {
+		logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("failed to set featureExtUTF8Support: %v", featAddErr))
+	}
+	if featAddErr := l.FeatureExt.Add(&featureExtAzureSQLDNSCaching{}); featAddErr != nil {
+		logger.Log(ctx, msdsn.LogDebug, fmt.Sprintf("failed to set featureExtAzureSQLDNSCaching: %v", featAddErr))
+	}
 	getClientId(&l.ClientID)
 	if p.ColumnEncryption {
 		_ = l.FeatureExt.Add(&featureExtColumnEncryption{})
