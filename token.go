@@ -561,7 +561,7 @@ type colAckStruct struct {
 	EnclaveType string
 }
 
-type sessionRecoveryAckStruct struct {
+type genericAckStruct struct {
 	data []byte
 }
 
@@ -580,9 +580,7 @@ func parseFeatureExtAck(r *tdsBuffer) featureExtAck {
 		case featExtSESSIONRECOVERY:
 			data := make([]byte, length)
 			r.ReadFull(data)
-			sessionRecoveryAck := sessionRecoveryAckStruct{
-				data: data,
-			}
+			sessionRecoveryAck := genericAckStruct{data: data}
 			ack[feature] = sessionRecoveryAck
 			length -= uint32(len(data))
 		case featExtFEDAUTH:
@@ -618,18 +616,20 @@ func parseFeatureExtAck(r *tdsBuffer) featureExtAck {
 		case featExtDATACLASSIFICATION:
 			data := make([]byte, length)
 			r.ReadFull(data)
-			sessionRecoveryAck := sessionRecoveryAckStruct{
-				data: data,
-			}
-			ack[feature] = sessionRecoveryAck
+			ackStruct := genericAckStruct{data: data}
+			ack[feature] = ackStruct
 			length -= uint32(len(data))
 		case featExtUTF8SUPPORT:
 			data := make([]byte, length)
 			r.ReadFull(data)
-			sessionRecoveryAck := sessionRecoveryAckStruct{
-				data: data,
-			}
-			ack[feature] = sessionRecoveryAck
+			ackStruct := genericAckStruct{data: data}
+			ack[feature] = ackStruct
+			length -= uint32(len(data))
+		case featExtAZURESQLDNSCACHING:
+			data := make([]byte, length)
+			r.ReadFull(data)
+			ackStruct := genericAckStruct{data: data}
+			ack[feature] = ackStruct
 			length -= uint32(len(data))
 		default:
 			// skip unknown feature
@@ -665,7 +665,7 @@ func writeFeatureExtAck(w io.Writer, ack featureExtAck) error {
 	for feat, val := range ack {
 		switch feat {
 		case featExtSESSIONRECOVERY:
-			sessionRecoveryAck, _ := val.(sessionRecoveryAckStruct)
+			sessionRecoveryAck, _ := val.(genericAckStruct)
 			length := uint32(len(sessionRecoveryAck.data))
 			if err := writeByte(featExtSESSIONRECOVERY); err != nil {
 				return err
@@ -758,27 +758,39 @@ func writeFeatureExtAck(w io.Writer, ack featureExtAck) error {
 				}
 			}
 		case featExtDATACLASSIFICATION:
-			sessionRecoveryAck, _ := val.(sessionRecoveryAckStruct)
-			length := uint32(len(sessionRecoveryAck.data))
+			ack, _ := val.(genericAckStruct)
+			length := uint32(len(ack.data))
 			if err := writeByte(featExtDATACLASSIFICATION); err != nil {
 				return err
 			}
 			if err := writeUint32(length); err != nil {
 				return err
 			}
-			if _, err := w.Write(sessionRecoveryAck.data); err != nil {
+			if _, err := w.Write(ack.data); err != nil {
 				return err
 			}
 		case featExtUTF8SUPPORT:
-			sessionRecoveryAck, _ := val.(sessionRecoveryAckStruct)
-			length := uint32(len(sessionRecoveryAck.data))
+			ack, _ := val.(genericAckStruct)
+			length := uint32(len(ack.data))
 			if err := writeByte(featExtUTF8SUPPORT); err != nil {
 				return err
 			}
 			if err := writeUint32(length); err != nil {
 				return err
 			}
-			if _, err := w.Write(sessionRecoveryAck.data); err != nil {
+			if _, err := w.Write(ack.data); err != nil {
+				return err
+			}
+		case featExtAZURESQLDNSCACHING:
+			ack, _ := val.(genericAckStruct)
+			length := uint32(len(ack.data))
+			if err := writeByte(featExtUTF8SUPPORT); err != nil {
+				return err
+			}
+			if err := writeUint32(length); err != nil {
+				return err
+			}
+			if _, err := w.Write(ack.data); err != nil {
 				return err
 			}
 		default:

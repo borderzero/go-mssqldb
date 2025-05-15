@@ -215,6 +215,10 @@ func (r *tdsBuffer) readNextPacket() error {
 }
 
 func (r *tdsBuffer) BeginRead() (packetType, error) {
+	if r.serverConn != nil {
+		resetSession := false
+		r.serverConn.buf.BeginPacket(r.rPacketType, resetSession)
+	}
 	err := r.readNextPacket()
 	if err != nil {
 		return 0, err
