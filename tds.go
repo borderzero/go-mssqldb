@@ -156,6 +156,7 @@ const (
 	featExtAZURESQLSUPPORT    byte = 0x08
 	featExtDATACLASSIFICATION byte = 0x09
 	featExtUTF8SUPPORT        byte = 0x0A
+	featExtAZURESQLDNSCACHING byte = 0x0B
 	featExtTERMINATOR         byte = 0xFF
 )
 
@@ -563,7 +564,7 @@ func (f *featureExtUTF8Support) toBytes() []byte { return nil } // Can be []byte
 // AZURESQLDNSCACHING feature extension
 type featureExtAzureSQLDNSCaching struct{}
 
-func (f *featureExtAzureSQLDNSCaching) featureID() byte { return 0x0B }
+func (f *featureExtAzureSQLDNSCaching) featureID() byte { return featExtAZURESQLDNSCACHING }
 func (f *featureExtAzureSQLDNSCaching) toBytes() []byte { return nil }
 
 type loginHeader struct {
@@ -1095,12 +1096,12 @@ func prepareLogin(ctx context.Context, c *Connector, p msdsn.Config, logger Cont
 		ChangePassword: p.ChangePassword,
 		ClientPID:      uint32(os.Getpid()),
 	}
-	l.FeatureExt.Add(&featureExtSessionRecovery{})
-	l.FeatureExt.Add(&featureExtColumnEncryption{version: 0x03})
-	l.FeatureExt.Add(&featureExtGlobalTransactions{})
-	l.FeatureExt.Add(&featureExtDataClassification{version: 0x02})
-	l.FeatureExt.Add(&featureExtUTF8Support{})
-	l.FeatureExt.Add(&featureExtAzureSQLDNSCaching{})
+	_ = l.FeatureExt.Add(&featureExtSessionRecovery{})
+	_ = l.FeatureExt.Add(&featureExtColumnEncryption{version: 0x03})
+	_ = l.FeatureExt.Add(&featureExtGlobalTransactions{})
+	_ = l.FeatureExt.Add(&featureExtDataClassification{version: 0x02})
+	_ = l.FeatureExt.Add(&featureExtUTF8Support{})
+	_ = l.FeatureExt.Add(&featureExtAzureSQLDNSCaching{})
 	getClientId(&l.ClientID)
 	if p.ColumnEncryption {
 		_ = l.FeatureExt.Add(&featureExtColumnEncryption{})

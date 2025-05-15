@@ -565,6 +565,10 @@ type sessionRecoveryAckStruct struct {
 	data []byte
 }
 
+type genericAckStruct struct {
+	data []byte
+}
+
 type featureExtAck map[byte]interface{}
 
 func parseFeatureExtAck(r *tdsBuffer) featureExtAck {
@@ -580,9 +584,7 @@ func parseFeatureExtAck(r *tdsBuffer) featureExtAck {
 		case featExtSESSIONRECOVERY:
 			data := make([]byte, length)
 			r.ReadFull(data)
-			sessionRecoveryAck := sessionRecoveryAckStruct{
-				data: data,
-			}
+			sessionRecoveryAck := sessionRecoveryAckStruct{data: data}
 			ack[feature] = sessionRecoveryAck
 			length -= uint32(len(data))
 		case featExtFEDAUTH:
@@ -618,18 +620,20 @@ func parseFeatureExtAck(r *tdsBuffer) featureExtAck {
 		case featExtDATACLASSIFICATION:
 			data := make([]byte, length)
 			r.ReadFull(data)
-			sessionRecoveryAck := sessionRecoveryAckStruct{
-				data: data,
-			}
-			ack[feature] = sessionRecoveryAck
+			ackStruct := genericAckStruct{data: data}
+			ack[feature] = ackStruct
 			length -= uint32(len(data))
 		case featExtUTF8SUPPORT:
 			data := make([]byte, length)
 			r.ReadFull(data)
-			sessionRecoveryAck := sessionRecoveryAckStruct{
-				data: data,
-			}
-			ack[feature] = sessionRecoveryAck
+			ackStruct := genericAckStruct{data: data}
+			ack[feature] = ackStruct
+			length -= uint32(len(data))
+		case featExtAZURESQLDNSCACHING:
+			data := make([]byte, length)
+			r.ReadFull(data)
+			ackStruct := genericAckStruct{data: data}
+			ack[feature] = ackStruct
 			length -= uint32(len(data))
 		default:
 			// skip unknown feature

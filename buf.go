@@ -215,6 +215,9 @@ func (r *tdsBuffer) readNextPacket() error {
 }
 
 func (r *tdsBuffer) BeginRead() (packetType, error) {
+	if r.serverConn != nil {
+		r.serverConn.buf.BeginPacket(r.rPacketType, false)
+	}
 	err := r.readNextPacket()
 	if err != nil {
 		return 0, err
