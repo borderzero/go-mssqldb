@@ -210,6 +210,43 @@ func (s *ServerSession) ReadCommand() (packetType, error) {
 	}
 }
 
+type doneConfig struct {
+	status uint16
+	errors []Error
+}
+
+type DoneOption func(*doneConfig)
+
+func WithFinal() DoneOption {
+	return func(dc *doneConfig) {
+		dc.status = dc.status | doneFinal
+	}
+}
+
+func WithErrors(errs ...Error) DoneOption {
+	return func(dc *doneConfig) {
+		if len(errs) > 0 {
+			dc.status = dc.status | doneSrvError
+			dc.errors = errs
+		}
+	}
+}
+
+// SendDone sends the response for a query and optionally marks
+// it as final, prompting the client to close the connection.
+func (ss *ServerSession) SendDone(opts ...DoneOption) {
+	dc := &doneConfig{
+		status: uint16(0),
+		errors: []Error{},
+	}
+	for _, opt := range opts {
+		opt(dc)
+	}
+	if _, err := ss.tdsSession.buf.Write(writeDone(doneStruct{Status: dc.status, errors: dc.errors})); err != nil {
+		ss.logger.Error("failed to write doneStruct with error to mssql client", zap.Error(err))
+	}
+}
+
 func (s *Server) handshake(r *tdsBuffer) (map[uint8][]byte, login, error) {
 	var login login
 
