@@ -1332,9 +1332,6 @@ initiate_connection:
 	if err != nil {
 		return nil, err
 	}
-	if border0DebugLogs {
-		fmt.Printf("Proxy -> Server sending login %+v\n", login)
-	}
 	err = sendLogin(outbuf, login)
 	if err != nil {
 		return nil, err

@@ -151,49 +151,11 @@ func (s *Server) ReadLogin(conn net.Conn) (*ServerSession, *login, map[uint8][]b
 func (s *ServerSession) ReadCommand() (packetType, error) {
 	var buf []byte
 
-	// FIXME: remove
-	if s.debug {
-		s.logger.Debug(
-			"Start ReadCommand",
-			zap.String("tdsSession.id", s.tdsSession.id),
-			zap.Int("tdsSession.buf.rpos", s.tdsSession.buf.rpos),
-			zap.Int("tdsSession.buf.rsize", s.tdsSession.buf.rsize),
-		)
-	}
-
 	for {
-		// FIXME: REMOVE
-		if s.debug {
-			s.logger.Debug(
-				"ReadCommand",
-				zap.String("tdsSession.id", s.tdsSession.id),
-				zap.Int("tdsSession.buf.rpos", s.tdsSession.buf.rpos),
-				zap.Int("tdsSession.buf.rsize", s.tdsSession.buf.rsize),
-			)
-		}
 
 		rPacketType, err := s.tdsSession.buf.BeginRead()
 		if err != nil {
-			// FIXME: REMOVE
-			if s.debug {
-				s.logger.Debug(
-					"ReadCommand error",
-					zap.String("tdsSession.id", s.tdsSession.id),
-					zap.Error(err),
-				)
-			}
 			return 0, err
-		}
-
-		// FIXME: REMOVE
-		if s.debug {
-			s.logger.Debug(
-				"ReadCommand got data",
-				zap.Uint8("rPacketType", uint8(rPacketType)),
-				zap.String("tdsSession.id", s.tdsSession.id),
-				zap.Int("tdsSession.buf.rpos", s.tdsSession.buf.rpos),
-				zap.Int("tdsSession.buf.rsize", s.tdsSession.buf.rsize),
-			)
 		}
 
 		bytes := make([]byte, s.tdsSession.buf.rsize-s.tdsSession.buf.rpos)
@@ -218,11 +180,6 @@ func (s *Server) handshake(r *tdsBuffer) (map[uint8][]byte, login, error) {
 		return loginOptions, login, err
 	}
 
-	// FIXME: REMOVE
-	if s.debug {
-		s.logger.Info("Client -> Proxy: revieved prelogin options", zap.Any("login_opts", loginOptions))
-	}
-
 	err = s.writePrelogin(r)
 	if err != nil {
 		return loginOptions, login, err
@@ -231,11 +188,6 @@ func (s *Server) handshake(r *tdsBuffer) (map[uint8][]byte, login, error) {
 	login, err = s.readLogin(r)
 	if err != nil {
 		return loginOptions, login, err
-	}
-
-	// FIXME: REMOVE
-	if s.debug {
-		s.logger.Info("Client -> Proxy: revieved login packet ", zap.Any("login_opts", loginOptions))
 	}
 
 	return loginOptions, login, nil
@@ -285,11 +237,6 @@ func (s *Server) readPrelogin(r *tdsBuffer) (map[uint8][]byte, error) {
 
 func (s *Server) writePrelogin(r *tdsBuffer) error {
 	fields := s.preparePreloginResponseFields()
-
-	// FIXME: REMOVE
-	if s.debug {
-		s.logger.Info("Proxy -> Client: returned prelogin response", zap.Any("fields", fields))
-	}
 
 	if err := writePrelogin(packReply, r, fields); err != nil {
 		return err
@@ -378,10 +325,6 @@ func (s *Server) readLogin(r *tdsBuffer) (login, error) {
 	if err != nil {
 		return login, fmt.Errorf("failed to read servername: %w", err)
 	}
-	// FIXME: REMOVE
-	if s.debug {
-		s.logger.Info("Database name in login request", zap.String("dbname", login.Database))
-	}
 	login.SSPI, err = readLoginFieldBytes(struct_buf, loginHeader.SSPIOffset, loginHeader.SSPILength)
 	if err != nil {
 		return login, fmt.Errorf("failed to read sspi: %w", err)
@@ -404,11 +347,6 @@ func (s *Server) readLogin(r *tdsBuffer) (login, error) {
 		extStart := int(extPtr)
 		if extStart+1 > len(struct_buf) {
 			return login, fmt.Errorf("invalid FeatureExt pointer: not enough bytes at offset %d", extStart)
-		}
-
-		// FIXME: REMOVE
-		if s.debug {
-			s.logger.Info("Proxy-Client: starting FeatureExt parse from offset", zap.Int("extStart", extStart))
 		}
 
 		reader := bytes.NewReader(struct_buf[extStart:])
@@ -435,60 +373,37 @@ func (s *Server) readLogin(r *tdsBuffer) (login, error) {
 				return login, fmt.Errorf("failed to read FeatureData for FeatureID 0x%X: %w", featureID, err)
 			}
 
+			// Only the features below are tracked. Anything else (e.g.
+			// AZURESQLSUPPORT 0x08, JSONSUPPORT 0x0D, VECTORSUPPORT 0x0E, or IDs
+			// added by future drivers) is skipped rather than rejected.
+			// This only controls which client features the parser retains.
+			// Upstream feature negotiation is independent (see prepareLogin),
+			// so skipping an entry here does not guarantee client fallback.
 			switch featureID {
-			case 0x01:
-				login.FeatureExt.Add(&featureExtSessionRecovery{})
-			case 0x04:
-				login.FeatureExt.Add(&featureExtColumnEncryption{
-					version: data[0],
-				})
-			case 0x5:
-				login.FeatureExt.Add(&featureExtGlobalTransactions{})
-			case 0x09:
-				login.FeatureExt.Add(&featureExtDataClassification{
-					version: data[0],
-				})
-			case 0x0A:
-				login.FeatureExt.Add(&featureExtUTF8Support{})
-			case 0x0B:
-				login.FeatureExt.Add(&featureExtAzureSQLDNSCaching{})
-			default:
-				// FIXME: REMOVE
-				if s.debug {
-					s.logger.Error("Proxy-Client: unknown FeatureExt ID", zap.Uint8("featureID", featureID), zap.Uint32("featureDataLen", featureDataLen))
+			case featExtFEDAUTH:
+				// FEDAUTH carries authentication state the proxy can neither
+				// validate nor complete, so the login is rejected.
+				return login, errors.New("federated authentication (FeatureExt 0x02) is not supported")
+			case featExtSESSIONRECOVERY:
+				_ = login.FeatureExt.Add(&featureExtSessionRecovery{})
+			case featExtCOLUMNENCRYPTION:
+				if len(data) > 0 {
+					_ = login.FeatureExt.Add(&featureExtColumnEncryption{version: data[0]})
 				}
-				return login, fmt.Errorf("unknown FeatureExt ID 0x%02X", featureID)
-			}
-			// FIXME: REMOVE
-			if s.debug {
-				s.logger.Info("FeatureExt", zap.Uint8("featureID", featureID), zap.Uint32("featureDataLen", featureDataLen), zap.Binary("data", data))
+			case featExtGLOBALTRANSACTIONS:
+				_ = login.FeatureExt.Add(&featureExtGlobalTransactions{})
+			case featExtDATACLASSIFICATION:
+				if len(data) > 0 {
+					_ = login.FeatureExt.Add(&featureExtDataClassification{version: data[0]})
+				}
+			case featExtUTF8SUPPORT:
+				_ = login.FeatureExt.Add(&featureExtUTF8Support{})
+			case featExtAZURESQLDNSCACHING:
+				_ = login.FeatureExt.Add(&featureExtAzureSQLDNSCaching{})
 			}
 		}
 	}
 
-	if s.debug {
-		fmt.Printf("\n--- TDS LOGIN PACKET SUMMARY ---\n")
-		fmt.Printf("TDS Version: 0x%08X\n", login.TDSVersion)
-		fmt.Printf("Client PID: %d\n", login.ClientPID)
-		fmt.Printf("OptionFlags1: 0x%02X\n", login.OptionFlags1)
-		fmt.Printf("OptionFlags2: 0x%02X\n", login.OptionFlags2)
-		fmt.Printf("OptionFlags3: 0x%02X\n", login.OptionFlags3)
-		fmt.Printf("Client Time Zone: %d\n", login.ClientTimeZone)
-		fmt.Printf("Client LCID: 0x%08X\n", login.ClientLCID)
-		fmt.Printf("Client ID: % X\n", login.ClientID[:])
-		fmt.Printf("HostName: %s\n", login.HostName)
-		fmt.Printf("UserName: %s\n", login.UserName)
-		fmt.Printf("AppName: %s\n", login.AppName)
-		fmt.Printf("ServerName: %s\n", login.ServerName)
-		fmt.Printf("CtlIntName: %s\n", login.CtlIntName)
-		fmt.Printf("Language: %s\n", login.Language)
-		fmt.Printf("Database: %s\n", login.Database)
-		fmt.Printf("AttachDBFile: %s\n", login.AtchDBFile)
-		fmt.Printf("ChangePassword: %s\n", login.ChangePassword)
-		fmt.Printf("SSPI: % X\n", login.SSPI)
-		fmt.Printf("FeatureExt: % X\n", login.FeatureExt)
-		fmt.Printf("--- END LOGIN PACKET SUMMARY ---\n\n")
-	}
 	return login, nil
 }
 
@@ -509,17 +424,6 @@ func readLoginFieldBytes(b []byte, offset uint16, length uint16) ([]byte, error)
 }
 
 func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, spid uint16) error {
-	// FIXME: REMOVE
-	if s.debug {
-		s.logger.Info("Proxy-Client: Writing login tokens", zap.Any("login_tokens", loginTokens))
-	}
-	loginAck := loginAckStruct{
-		Interface:  1,
-		TDSVersion: verTDS74,
-		ProgName:   s.progName,
-		ProgVer:    s.version,
-	}
-
 	done := doneStruct{
 		Status:   0,
 		CurCmd:   0,
@@ -536,27 +440,11 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 		switch t := token.(type) {
 		case loginAckStruct:
 			if _, err := session.tdsSession.buf.Write(writeLoginAck(t)); err != nil {
-				// FIXME: REMOVE
-				if s.debug {
-					s.logger.Info("Proxy-Client: Error writing loginAck", zap.Error(err))
-				}
 				return err
-			}
-			// FIXME: REMOVE
-			if s.debug {
-				s.logger.Info("Proxy-Client: Error writing loginAck", zap.Any("loginAck", loginAck))
 			}
 		case doneStruct:
 			if _, err := session.tdsSession.buf.Write(writeDone(done)); err != nil {
-				// FIXME: REMOVE
-				if s.debug {
-					s.logger.Error("Proxy-Client: Error writing doneStruct", zap.Error(err))
-				}
 				return err
-			}
-			// FIXME: REMOVE
-			if s.debug {
-				s.logger.Info("Proxy-Client: Writing doneStruct", zap.Any("done", done))
 			}
 		case envChange:
 			data := make([]byte, 0, len(t.data)+3)
@@ -568,15 +456,7 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 			data = append(data, t.data...)
 
 			if _, err := session.tdsSession.buf.Write(data); err != nil {
-				// FIXME: REMOVE
-				if s.debug {
-					s.logger.Info("Proxy-Client: Error writing envChange", zap.Error(err))
-				}
 				return err
-			}
-			// FIXME: REMOVE
-			if s.debug {
-				s.logger.Info("Proxy-Client: Writing envChange", zap.Any("data", data))
 			}
 		case loginToken:
 			data := make([]byte, 0, len(t.data)+3)
@@ -589,28 +469,12 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 			data = append(data, t.data...)
 
 			if _, err := session.tdsSession.buf.Write(data); err != nil {
-				// FIXME: REMOVE
-				if s.debug {
-					s.logger.Info("Proxy-Client: Error writing loginToken", zap.Error(err))
-				}
 				return err
 			}
-			// FIXME: REMOVE
-			if s.debug {
-				s.logger.Info("Proxy-Client: Writing loginToken", zap.Any("token", t.token))
-			}
 		case featureExtAck:
-			// FIXME: REMOVE
-			if s.debug {
-				s.logger.Info("Proxy-Client: Writing featureExtAck", zap.Any("token", t))
-			}
 			// Serialize the raw feature ACK data (feature entries + terminator)
 			var rawBuf bytes.Buffer
 			if err := writeFeatureExtAck(&rawBuf, t); err != nil {
-				// FIXME: REMOVE
-				if s.debug {
-					s.logger.Error("Proxy-Client: Error building featureExtAck", zap.Error(err))
-				}
 				return err
 			}
 			raw := rawBuf.Bytes()
@@ -628,20 +492,9 @@ func (s *Server) WriteLogin(session *ServerSession, loginTokens []tokenStruct, s
 			if _, err := session.tdsSession.buf.Write(raw); err != nil {
 				return err
 			}
-			// FIXME: REMOVE
-			if s.debug {
-				s.logger.Error("Proxy-Client: featureExtAck raw bytes written", zap.Int("len", len(raw)))
-			}
 		default:
 			fmt.Printf("Proxy-Client: Unknown token type: %T\n", t)
 		}
-	}
-
-	// FIXME: REMOVE
-	if s.debug {
-		fmt.Printf("Proxy-Client: Writing loginTokens %+v\n", loginTokens)
-		fmt.Printf("Proxy-Client: Writing loginAck %+v\n", loginAck)
-		fmt.Printf("Proxy-Client: Writing doneStruct %+v\n", done)
 	}
 
 	return session.tdsSession.buf.FinishPacket()
@@ -677,33 +530,15 @@ func (s *ServerSession) ParseHeader() (header, error) {
 }
 
 func (s *ServerSession) ParseSQLBatch() ([]headerStruct, string, error) {
-	// FIXME: REMOVE
-	if s.debug {
-		s.logger.Debug("ParseSQLBatch",
-			zap.String("tdsSession.id", s.tdsSession.id),
-			zap.Int("tdsSession.buf.rsize", s.tdsSession.buf.rsize),
-			zap.Int("tdsSession.buf.rpos", s.tdsSession.buf.rpos),
-		)
-	}
 
 	headers, err := readAllHeaders(s.tdsSession.buf)
 	if err != nil {
 		return nil, "", err
 	}
 
-	// FIXME: REMOVE
-	if s.debug {
-		s.logger.Debug("ParseSQLBatch headers", zap.Any("headers", headers))
-	}
-
 	query, err := readUcs2(s.tdsSession.buf, (s.tdsSession.buf.rsize-s.tdsSession.buf.rpos)/2)
 	if err != nil {
 		return nil, "", err
-	}
-
-	// FIXME: REMOVE
-	if s.debug {
-		s.logger.Debug("ParseSQLBatch query", zap.String("query", query))
 	}
 
 	return headers, query, nil
@@ -1209,17 +1044,10 @@ func (c *Client) processResponse(
 			}
 
 			// Read Status (1 byte)
-			status, err := c.conn.sess.buf.ReadByte()
-			if err != nil {
+			if _, err := c.conn.sess.buf.ReadByte(); err != nil {
 				return nil, StreamError{
 					InnerError: fmt.Errorf("failed to read SESSIONSTATE Status: %w", err),
 				}
-			}
-			fRecoverable := status&0x01 == 0x01
-
-			// FIXME: REMOVE
-			if c.debug {
-				fmt.Printf("processResponse: SESSIONSTATE received - TotalLen=%d, SeqNo=%d, fRecoverable=%v\n", totalLen, seqNo, fRecoverable)
 			}
 
 			bytesLeft := int(totalLen - 5) // minus SeqNo (4) + Status (1)
